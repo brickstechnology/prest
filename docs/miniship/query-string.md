@@ -208,8 +208,16 @@ the login `rest` connects with.
 - **It did not review the `_QUERIES` template language**, for the same reason.
   GHSA-5rwc-2hg5-2hmc and GHSA-r3hj-2fxx-7f3h are both in that language.
 - **It did not measure the three bounds against a miniship workload.** 5000, 30s
-  and 16KB are the field's numbers, taken deliberately rather than tuned; the
-  first `Project` with real traffic is what should move them.
+  and 16KB are the field's own published defaults, read out of
+  `QUERY-BOUNDS-AND-FAIRNESS.md` and taken deliberately rather than tuned. **No
+  figure here came from a clock on the machine this was written on**, and none
+  should: a bound sized against a loaded developer machine is sized against
+  nothing. The first `Project` with real traffic is what should move them, and a
+  measurement to move them by belongs on a quiet box.
+- **Nothing in the suite times anything.** The time limit's subject proves the
+  cancellation with the status and the absent row — a `pg_sleep(5)` that
+  finished would have answered 200 — rather than with a stopwatch, so the suite
+  cannot go red because the machine was busy.
 - **It did not change `chkInvalidIdentifier`**, upstream's own permissive
   identifier check, which is still reachable from the unrouted catalog
   handlers. The screen does not rely on it.

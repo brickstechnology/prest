@@ -308,7 +308,8 @@ this one did not — two commits is a small sample of what a release moves.
 deployed `prestd` through upstream's whole route table, and skip unless
 `make test-integration` has started one. They assert routes this fork removes,
 so that target is not run here. In `miniship.yml` they skip, 109 of them, and
-**93** Postgres-backed tests run. The first number is upstream's and moves with
+**97** Postgres-backed tests run, measured on a CI runner rather than on a
+developer's machine. The first number is upstream's and moves with
 a rebase; the second is this branch's and moves whenever a patch adds a subject,
 so treat both as the last measurement rather than a promise. `miniship.yml`
 prints them on every run's summary, beside the line
