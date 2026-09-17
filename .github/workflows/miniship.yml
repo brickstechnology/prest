@@ -1,0 +1,68 @@
+# miniship's own check on the `miniship` patch line.
+#
+# Upstream's workflows are written for prest/prest: they push images, cut
+# releases, comment with secrets this fork does not hold, or exercise routes
+# this fork removes. They are disabled in the fork's Actions settings, and
+# this one runs instead. MINISHIP.md lists which are off and why.
+name: miniship
+
+on:
+  push:
+    branches: [miniship]
+  pull_request:
+    branches: [miniship]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go vet and go test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # The image upstream's integration compose uses: migration 002 creates
+        # the `vector` extension, which plain postgres:18 does not ship.
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # integration/postgres/... connects with these and fails, rather than
+      # skips, when the database is unreachable.
+      PREST_PG_HOST: 127.0.0.1
+      PREST_PG_PORT: "5432"
+      PREST_PG_USER: postgres
+      PREST_PG_PASS: postgres
+      PREST_PG_DATABASE: prest-test
+      PREST_QUERIES_LOCATION: ${{ github.workspace }}/testdata/queries
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Creates prest-test and secondary-db, loads testdata/schema.sql, builds
+      # the test plugin and runs the migrations: what upstream's db-init
+      # container does before its suite.
+      - name: Seed the test databases
+        run: bash ./testdata/db-init.sh
+
+      - name: go vet
+        run: go vet -tags prest_test_hooks ./...
+
+      # -race as upstream runs it; the plugin tests expect a plugin built
+      # without -race to fail to load.
+      - name: go test
+        run: go test -tags prest_test_hooks -race -count=1 ./...
