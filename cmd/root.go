@@ -60,6 +60,7 @@ func Execute(ctx context.Context, cfg *config.Prest) {
 	migrateCmd.AddCommand(upCmd)
 	migrateCmd.AddCommand(resetCmd)
 	RootCmd.AddCommand(versionCmd)
+	RootCmd.AddCommand(healthCmd) // miniship
 	RootCmd.AddCommand(migrateCmd)
 	migrateCmd.PersistentFlags().StringVar(&path, "path", cfg.MigrationsPath, "Migrations directory")
 

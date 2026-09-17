@@ -78,9 +78,17 @@ jobs:
 
       # A green with every database test skipped looks like a green with every
       # one run, so the count goes on the run's summary, whatever happened.
+      #
+      # rest's own subjects (integration/postgres/anonymousrole) print one
+      # line: how many needed a live Postgres and how many got one. That
+      # package fails when the two differ; this step fails when the line is
+      # missing, so a run that never reached them is not a pass either.
       - name: how many database tests ran, and how many skipped
         if: always()
         run: |
           ran="$(grep -c -E '^--- (PASS|FAIL):' integration.log || true)"
           skipped="$(grep -c -E '^--- SKIP:' integration.log || true)"
           echo "integration: ${ran} top-level tests ran, ${skipped} skipped" | tee -a "$GITHUB_STEP_SUMMARY"
+          census="$(grep -E '^rest: [0-9]+ subjects needed a live Postgres, [0-9]+ got one$' integration.log || true)"
+          echo "${census:-rest: the live-Postgres line is missing, so its subjects did not run}" | tee -a "$GITHUB_STEP_SUMMARY"
+          test -n "$census"
