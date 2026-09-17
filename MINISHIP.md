@@ -78,6 +78,12 @@ as written.
    can compare the branch with the fork point, and also runs on a
    `rebase/...` branch so a rebase is checked before it replaces `miniship`.
    Paths: `MINISHIP.md`, `miniship/`, `.github/workflows/miniship.yml`
+6. **The binary names its upstream tag** — upstream's fallback version is
+   `2.0.0`, and miniship's image is built without the `-ldflags` that replace
+   it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
+   `2.4.2+miniship` now, and `cmd/version_miniship_test.go` holds it to the
+   fork point above, so a rebase that moves one and not the other is red.
+   Paths: `helpers/prest.go`, `cmd/version_miniship_test.go`
 
 ## Taking an upstream fix
 
