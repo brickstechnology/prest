@@ -87,6 +87,17 @@ func (p *postgres) asRole(ctx context.Context, role string, read func(*sql.Stmt)
 	// A read commits nothing, so every path ends in a rollback.
 	defer func() { _ = tx.Rollback() }()
 
+	// miniship (#549): the time limit, set on the transaction and ending with
+	// it, so the pooled connection goes back without it. It is set as the
+	// login, before the role is entered, and the number is rest's own
+	// configuration rather than anything a caller sent.
+	if ms := p.cfg.PGStatementTimeoutMS; ms > 0 {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", ms)); err != nil {
+			slog.Error("could not set the read's time limit", "err", logsafe.Error(err))
+			return &scanner.PrestScanner{Error: err}
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE "+pq.QuoteIdentifier(role)); err != nil {
 		slog.Error("could not become the anonymous role", "role", role, "err", logsafe.Error(err))
 		return &scanner.PrestScanner{Error: fmt.Errorf("%w: %s", adapters.ErrRoleNotEntered, role)}

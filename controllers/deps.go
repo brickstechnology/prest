@@ -47,6 +47,10 @@ type Deps struct {
 	// becomes it. Nil refuses the table read rather than reading as the login.
 	Roles  adapters.AnonymousRoles
 	Reader adapters.RoleReader
+
+	// miniship: the limits a table read is held to. A zero value is the
+	// default, so a handler built without them is still bounded.
+	Bounds QueryBounds
 }
 
 // NewDepsFromConfig builds handler dependencies from application config.
@@ -79,6 +83,7 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 		DB:            p.Adapter,
 		Roles:         roles,
 		Reader:        reader,
+		Bounds:        QueryBounds{MaxPageSize: p.PGMaxPageSize},
 		Pinger:        p.Adapter,
 		Readiness:     p.Adapter,
 		Cache:         cacher,

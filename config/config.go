@@ -115,6 +115,14 @@ type Prest struct {
 	PGSSLKey             string
 	PGSSLRootCert        string
 	PGAnonRole           string // miniship: the role a read of PGDatabase becomes, with no default
+	// miniship (#549): the bounds every table read is held to.
+	// PGMaxPageSize is the largest page rest serves; a larger request is
+	// capped to it, and a read that asks for no page is given it.
+	// PGStatementTimeoutMS is set per transaction with SET LOCAL
+	// statement_timeout, so a statement that runs past it is cancelled by the
+	// Database itself. docs/miniship/query-string.md says where both came from.
+	PGMaxPageSize        int
+	PGStatementTimeoutMS int
 	ContextPath          string
 	PGMaxIdleConn        int
 	PGMaxOpenConn        int
@@ -396,6 +404,9 @@ func viperCfg() (*viper.Viper, string) {
 	v.SetDefault("pg.maxidleconn", 0) // avoids db memory leak on req timeout
 	v.SetDefault("pg.maxopenconn", 10)
 	v.SetDefault("pg.conntimeout", 10)
+	// miniship (#549): the read bounds. See docs/miniship/query-string.md.
+	v.SetDefault("pg.max_page_size", 5000)
+	v.SetDefault("pg.statement_timeout_ms", 30000)
 	v.SetDefault("pg.single", true)
 	v.SetDefault("pg.cache", true)
 	// todo: replace this with prefer, will need to replace lib/pq
@@ -714,6 +725,8 @@ func parseDBConfig(v *viper.Viper, cfg *Prest) {
 	cfg.PGMaxIdleConn = v.GetInt("pg.maxidleconn")
 	cfg.PGMaxOpenConn = v.GetInt("pg.maxopenconn")
 	cfg.PGConnTimeout = v.GetInt("pg.conntimeout")
+	cfg.PGMaxPageSize = v.GetInt("pg.max_page_size")
+	cfg.PGStatementTimeoutMS = v.GetInt("pg.statement_timeout_ms")
 	cfg.PGCache = v.GetBool("pg.cache")
 	cfg.SingleDB = v.GetBool("pg.single")
 }
