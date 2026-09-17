@@ -150,7 +150,43 @@ put in its place. Taking a fix is five steps, and the order matters:
 
 ### Walked once, 17 September 2026
 
-WALK-RESULT-PLACEHOLDER
+Upstream's newest release is still `v2.4.2`, the tag this record already names,
+so there was nothing real to rebase onto. The walk was made against upstream's
+`main` head instead — `254f30a`, two commits past `v2.4.2` — in a scratch clone,
+under a local stand-in tag `v2.4.3` at that commit. **Nothing from the walk was
+pushed**, and no tag named `v2.4.3` exists in this repository or upstream.
+
+| | |
+| --- | --- |
+| Step 1, rebase | `git rebase --onto v2.4.3 v2.4.2` replayed **9 commits**, dropping pull request #1's merge. **One conflict**, in `adapters/postgres/postgres_test.go` |
+| Step 2, record | the two fork-point rows and `helpers.PrestVersionNumber`, to `v2.4.3` and `2.4.3+miniship`. No `Paths:` line moved |
+| Step 3, suite | `go vet` clean; **22 unit packages ok**, `miniship` and `cmd` among them; integration exit 0, **80 top-level tests ran and 126 skipped** |
+| Step 4, merge | `git merge -s ours` onto the old line, then `git diff v2.4.3 HEAD` — **20 files, and every one is a path a `Paths:` line above names** |
+| Hands-on | under half an hour, most of it the one conflict. Wall clock was longer, waiting on a loaded machine rather than on the procedure |
+
+**The conflict was an add/add, and both sides were kept.** Upstream's two new
+commits ([#1032], [#1033]) append a block of join-permission tests to the end of
+`adapters/postgres/postgres_test.go`, which is where patch 2 appends
+`TestDbFromCtx_refusesADatabaseItWasNotGiven`. Nothing about the two changes
+disagrees; git could not tell that from position alone. Resolving it was closing
+upstream's last function and putting the miniship test after it. **Expect this
+one again**: patch 2 and patch 4 both end their files, so an upstream commit
+that also ends one conflicts on position every time.
+
+**The skip count moves with upstream, and that is not a regression.** The line
+above records 80 run and 109 skipped on this branch. The walk skipped 126,
+and the 17 are exactly upstream's new
+`integration/postgres/controllers/join_restrict_test.go`, which needs a deployed
+`prestd` like the rest of `integration/suites/...`. A rebase should expect the
+second number to grow and the first to hold.
+
+**What the walk did not prove.** It ran on a stand-in tag, so it could not run
+step 4's pull request or watch `miniship.yml` fire on a `rebase/**` push; those
+two steps are written and untried. And a real upstream tag may carry changes
+this one did not — two commits is a small sample of what a release moves.
+
+[#1032]: https://github.com/prest/prest/pull/1032
+[#1033]: https://github.com/prest/prest/pull/1033
 
 ## Upstream's tests that do not run here
 
