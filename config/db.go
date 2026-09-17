@@ -22,6 +22,7 @@ func setPostgresDefaults(v *viper.Viper) {
 	v.SetDefault("pg.conntimeout", 10)
 	// miniship (#549): the read bounds. See docs/miniship/query-string.md.
 	v.SetDefault("pg.max_page_size", 5000)
+	v.SetDefault("pg.max_query_len", 16384)
 	v.SetDefault("pg.statement_timeout_ms", 30000)
 	v.SetDefault("pg.cache", true)
 	// todo: replace this with prefer, will need to replace lib/pq
@@ -86,6 +87,10 @@ func parseDBConfig(v *viper.Viper, cfg *Prest) error {
 	}
 	// miniship (#549): the read bounds.
 	cfg.PGMaxPageSize, err = configuredInt(v, "pg.max_page_size")
+	if err != nil {
+		return err
+	}
+	cfg.PGMaxQueryLen, err = configuredInt(v, "pg.max_query_len")
 	if err != nil {
 		return err
 	}

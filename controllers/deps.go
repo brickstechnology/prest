@@ -91,7 +91,7 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 		DB:            p.Adapter,
 		Roles:         roles,
 		Reader:        reader,
-		Bounds:        QueryBounds{MaxPageSize: p.PGMaxPageSize},
+		Bounds:        QueryBounds{MaxPageSize: p.PGMaxPageSize, MaxQueryLen: p.PGMaxQueryLen},
 		Pinger:        p.Adapter,
 		Readiness:     p.Adapter,
 		Cache:         cacher,
