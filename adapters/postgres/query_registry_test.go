@@ -835,6 +835,7 @@ func TestListQueries_CtxDB(t *testing.T) {
 	t.Parallel()
 
 	cfg := queryRegistryTestConf()
+	cfg.Databases = contextTestConf().Databases
 	defaultDB, defaultMock, err := sqlmock.New()
 	require.NoError(t, err)
 	ctxDB, ctxMock, err := sqlmock.New()

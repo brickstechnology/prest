@@ -63,6 +63,21 @@ func setupTestDB(t *testing.T) {
 	cfg := *base
 	cfg.AccessConf = cloneAccessConf(base.AccessConf)
 	cfg.QueriesPath = filepath.Join(helpers.TestdataDir(), "queries")
+	// miniship: the adapter refuses a database it was not given, where
+	// upstream tried any name on the default host, so both test databases
+	// are registered.
+	cfg.Databases = nil
+	for _, db := range helpers.Databases() {
+		cfg.Databases = append(cfg.Databases, config.DatabaseConf{
+			Alias:    db,
+			Host:     cfg.PGHost,
+			Port:     cfg.PGPort,
+			User:     cfg.PGUser,
+			Pass:     cfg.PGPass,
+			Database: db,
+			SSL:      config.DatabaseSSLConf{Mode: cfg.PGSSLMode},
+		})
+	}
 	pg := postgres.New(&cfg)
 	if err := postgres.Connect(pg); err != nil {
 		t.Fatalf("connect test database: %v", err)

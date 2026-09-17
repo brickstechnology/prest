@@ -145,7 +145,7 @@ func TestAddDatabaseToPool_returnsExistingWithoutConnect(t *testing.T) {
 
 func TestAddDatabaseToPool_singleflightDedup(t *testing.T) {
 	m := testManager(t)
-	uri := m.GetURI("otherdb")
+	uri := m.GetURI("testdb")
 
 	var connectCalls int32
 	var capturedDriver, capturedDSN string
@@ -172,7 +172,7 @@ func TestAddDatabaseToPool_singleflightDedup(t *testing.T) {
 	for i := range workers {
 		go func(idx int) {
 			defer wg.Done()
-			dbs[idx], errs[idx] = m.AddDatabaseToPool("otherdb")
+			dbs[idx], errs[idx] = m.AddDatabaseToPool("testdb")
 		}(i)
 	}
 	wg.Wait()
@@ -527,15 +527,22 @@ func TestManager_GetDatabase(t *testing.T) {
 func TestGetURI(t *testing.T) {
 	t.Parallel()
 
-	t.Run("uses legacy database name when no profile", func(t *testing.T) {
+	t.Run("uses the default database when no profile", func(t *testing.T) {
 		m := testManager(t)
-		uri := m.GetURI("customdb")
+		uri := m.GetURI("testdb")
 
-		require.Contains(t, uri, "dbname=customdb")
+		require.Contains(t, uri, "dbname=testdb")
 		require.Contains(t, uri, "user=u")
 		require.Contains(t, uri, "password=secret")
 		require.Contains(t, uri, "host=localhost")
 		require.Contains(t, uri, "port=5432")
+	})
+
+	// miniship: upstream built a URI for any name here, on the default host.
+	t.Run("has no URI for a name that is neither an alias nor the default", func(t *testing.T) {
+		m := testManager(t)
+
+		require.Empty(t, m.GetURI("customdb"))
 	})
 
 	t.Run("uses default database when name is empty", func(t *testing.T) {
@@ -725,7 +732,13 @@ func TestManager_CacheKeyForDB(t *testing.T) {
 	})
 
 	t.Run("finds correct URI among multiple databases", func(t *testing.T) {
-		m := testManager(t)
+		m := NewManager(&config.Prest{
+			PGDatabase: "testdb",
+			Databases: []config.DatabaseConf{
+				{Alias: "db1", Host: "localhost", Database: "db1"},
+				{Alias: "db2", Host: "localhost", Database: "db2"},
+			},
+		})
 		uri1 := m.GetURI("db1")
 		uri2 := m.GetURI("db2")
 

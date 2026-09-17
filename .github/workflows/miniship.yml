@@ -72,4 +72,15 @@ jobs:
       # the plugin tests expect a plugin built without -race to fail to load.
       - name: go test, integration
         env: *postgres-env
-        run: go test -tags prest_test_hooks -race -count=1 ./integration/...
+        run: |
+          set -o pipefail
+          go test -tags prest_test_hooks -race -count=1 -v ./integration/... 2>&1 | tee integration.log
+
+      # A green with every database test skipped looks like a green with every
+      # one run, so the count goes on the run's summary, whatever happened.
+      - name: how many database tests ran, and how many skipped
+        if: always()
+        run: |
+          ran="$(grep -c -E '^--- (PASS|FAIL):' integration.log || true)"
+          skipped="$(grep -c -E '^--- SKIP:' integration.log || true)"
+          echo "integration: ${ran} top-level tests ran, ${skipped} skipped" | tee -a "$GITHUB_STEP_SUMMARY"

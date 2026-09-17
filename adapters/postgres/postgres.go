@@ -141,10 +141,14 @@ func (p *postgres) Aliases() []string {
 	return []string{p.cfg.PGDatabase}
 }
 
-// IsRegistered reports whether alias is a configured database registry entry.
+// IsRegistered reports whether alias is a configured database registry entry,
+// or, with no registry, the one configured database.
+//
+// miniship: upstream answered true for any name when there is no registry, and
+// the name was then tried as a database on the default host.
 func (p *postgres) IsRegistered(alias string) bool {
 	if !p.cfg.HasDatabaseRegistry() {
-		return true
+		return alias == p.cfg.PGDatabase
 	}
 	_, ok := p.cfg.ProfileByAlias(alias)
 	return ok

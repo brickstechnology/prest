@@ -97,19 +97,32 @@ func (m *Manager) hasRegistry() bool {
 	return m.cfg.HasDatabaseRegistry()
 }
 
-// GetURI postgres connection URI for alias or legacy database name.
+// ErrDatabaseNotGiven is returned for a database name that is neither a
+// registry alias nor the configured default database.
+var ErrDatabaseNotGiven = errors.New("database not registered")
+
+// GetURI postgres connection URI for a registry alias or the configured
+// default database, and "" for any other name.
+//
+// miniship: upstream built a URI for any other name too, as a database of that
+// name on the default host, so a path segment could reach every database that
+// host serves. rest connects to the databases it was given and no others.
 func (m *Manager) GetURI(name string) string {
+	uri, _ := m.uriFor(name)
+	return uri
+}
+
+func (m *Manager) uriFor(name string) (string, bool) {
 	if conf, ok := m.cfg.ProfileByAlias(name); ok {
-		return BuildURI(conf, m.cfg)
+		return BuildURI(conf, m.cfg), true
+	}
+	if name != "" && name != m.cfg.PGDatabase {
+		return "", false
 	}
 
-	dbName := name
-	if dbName == "" {
-		dbName = m.cfg.PGDatabase
-	}
 	dbURI := fmt.Sprintf("user=%s dbname=%s host=%s port=%v sslmode=%v connect_timeout=%d",
 		m.cfg.PGUser,
-		dbName,
+		m.cfg.PGDatabase,
 		m.cfg.PGHost,
 		m.cfg.PGPort,
 		m.cfg.PGSSLMode,
@@ -126,7 +139,7 @@ func (m *Manager) GetURI(name string) string {
 	if m.cfg.PGSSLRootCert != "" {
 		dbURI += " sslrootcert=" + m.cfg.PGSSLRootCert
 	}
-	return dbURI
+	return dbURI, true
 }
 
 // BuildURI builds a postgres connection URI from a database profile.
@@ -242,7 +255,10 @@ func (m *Manager) poolLimitsFor(name string) (maxIdle, maxOpen int) {
 }
 
 func (m *Manager) getDatabaseFromPool(name string) *sqlx.DB {
-	uri := m.GetURI(name)
+	uri, ok := m.uriFor(name)
+	if !ok {
+		return nil
+	}
 	p := m.getPool()
 
 	p.Mtx.RLock()
@@ -252,13 +268,18 @@ func (m *Manager) getDatabaseFromPool(name string) *sqlx.DB {
 	return DB
 }
 
-// AddDatabaseToPool create and add connection to the pool
+// AddDatabaseToPool create and add connection to the pool. A name the
+// manager was not given is refused with ErrDatabaseNotGiven before any
+// connection is attempted.
 func (m *Manager) AddDatabaseToPool(name string) (*sqlx.DB, error) {
+	uri, ok := m.uriFor(name)
+	if !ok {
+		return nil, ErrDatabaseNotGiven
+	}
 	if DB := m.getDatabaseFromPool(name); DB != nil {
 		return DB, nil
 	}
 
-	uri := m.GetURI(name)
 	result, err, _ := m.addDB.Do(uri, func() (interface{}, error) {
 		if DB := m.getDatabaseFromPool(name); DB != nil {
 			return DB, nil
