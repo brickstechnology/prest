@@ -126,6 +126,37 @@ func TestTheSampleVersionIsItsTagOnTheMinishipLine(t *testing.T) {
 	require.Equal(t, "2.4.2+miniship", record.Version())
 }
 
+// A sentence after the Paths line is prose about the patch, not more paths.
+// The parser took every backticked word from the Paths line onward, so a patch
+// could come to claim a path it does not change — or, worse, one another patch
+// does change, which both record tests would then pass.
+func TestASentenceAfterThePathsLineIsNotMorePaths(t *testing.T) {
+	record, err := miniship.Parse(strings.Replace(sample,
+		"   `app/`\n",
+		"   `app/`\n   It also explains why `router/router.go` shrank.\n", 1))
+	require.NoError(t, err)
+	require.Equal(t, []string{"router/router.go", "router/surface_test.go", "app/"},
+		record.Patches[1].Paths)
+	require.Contains(t, record.Patches[1].Why, "shrank")
+}
+
+// A numbered line in the section that is not an entry is somebody's typo, and
+// the entry it should have been is then silently gone: its Paths leak onto the
+// patch above it, and only an interior one leaves a gap in the numbering.
+func TestANumberedLineThatIsNotAnEntryIsRefused(t *testing.T) {
+	_, err := miniship.Parse(strings.Replace(sample,
+		"2. **Two routes** —", "2. Two routes -", 1))
+	require.ErrorContains(t, err, "2.")
+}
+
+// An en dash is the same punctuation as far as a reader is concerned.
+func TestAnEnDashSeparatesAnEntryTheSameWay(t *testing.T) {
+	record, err := miniship.Parse(strings.ReplaceAll(sample, " — ", " – "))
+	require.NoError(t, err)
+	require.Len(t, record.Patches, 2)
+	require.Equal(t, "the line runs its own check.", record.Patches[0].Why)
+}
+
 func TestAPatchWithNoPathsLineIsRefused(t *testing.T) {
 	_, err := miniship.Parse(strings.Replace(sample, "   Paths: `.github/workflows/miniship.yml`\n", "", 1))
 	require.ErrorContains(t, err, "patch 1")

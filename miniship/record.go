@@ -79,11 +79,20 @@ var (
 	tagRow    = regexp.MustCompile("(?m)^\\| Upstream tag \\| `([^`]*)` \\|\\s*$")
 	commitRow = regexp.MustCompile("(?m)^\\| Upstream commit \\| `([^`]*)` \\|\\s*$")
 
-	// "3. **Name** — why", the first line of an entry.
-	entry = regexp.MustCompile(`^(\d+)\. \*\*(.+?)\*\*(?: — (.*))?$`)
+	// "3. **Name** — why", the first line of an entry. The dash may be an em
+	// dash, an en dash or a hyphen: they are the same punctuation to a reader,
+	// and a record that quietly dropped an entry over the difference is the
+	// failure this package exists to prevent.
+	entry = regexp.MustCompile(`^(\d+)\. \*\*(.+?)\*\*(?:\s*[—–-]\s*(.*))?$`)
+	// Any numbered line in the section, entry-shaped or not.
+	numbered = regexp.MustCompile(`^(\d+)\. (.*)$`)
 	// "   Paths: `a/b.go`, `c/`", an entry's indented Paths line.
 	pathsLine = regexp.MustCompile(`^\s+Paths:(.*)$`)
 	quoted    = regexp.MustCompile("`([^`]+)`")
+	// A line the Paths line wrapped onto: quoted paths and the commas between
+	// them, and nothing else. A sentence that happens to hold a backticked
+	// word is prose about the patch, not another path it changes.
+	onlyPaths = regexp.MustCompile("^(?:\\s|,|`[^`]+`)+$")
 )
 
 // Parse reads a record. It refuses one that states its fork point other than
@@ -150,13 +159,23 @@ func parsePatches(text string) ([]Patch, error) {
 			}
 			continue
 		}
+		// A numbered line that is not an entry would otherwise be skipped, and
+		// the entry somebody meant to write would be gone: its Paths line
+		// lands on the patch above, and only an interior number leaves a gap
+		// for TestThePatchesAreNumberedInOrderAndEachSaysWhy to find.
+		if m := numbered.FindStringSubmatch(line); m != nil {
+			return nil, fmt.Errorf(
+				"%s. is numbered like a patch but is not one; an entry is `N. **Name** — why`",
+				m[1])
+		}
 		if len(patches) == 0 || !strings.HasPrefix(line, " ") {
 			continue
 		}
 		last := &patches[len(patches)-1]
 		if m := pathsLine.FindStringSubmatch(line); m != nil {
 			line = m[1]
-		} else if len(last.Paths) == 0 {
+		} else if len(last.Paths) == 0 || !onlyPaths.MatchString(line) {
+			// Prose: either before the Paths line, or a sentence after it.
 			why = append(why, strings.TrimSpace(line))
 			continue
 		}

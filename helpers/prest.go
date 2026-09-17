@@ -16,11 +16,7 @@ var (
 	BuiltBy string
 
 	// PrestVersionNumber is the fallback version when Version is unset.
-	//
-	// miniship: the upstream tag this branch sits on, on the miniship line.
-	// MINISHIP.md states the tag and cmd/version_miniship_test.go holds this
-	// to it; upstream's own fallback here was 2.0.0 on a v2.4.2 tree.
-	PrestVersionNumber = "2.4.2+miniship"
+	PrestVersionNumber = "2.0.0"
 	// CommitHash is kept for compatibility; prefer Commit.
 	CommitHash string
 )

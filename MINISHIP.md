@@ -40,7 +40,9 @@ One entry for each change on `miniship`, oldest first: its name, why, and a
 fork point that no entry names, when an entry names a path the branch does
 not change, and when the numbers skip or repeat — so a patch cannot land
 unrecorded, and two pull requests that both add entry 5 cannot both merge
-as written.
+as written. **A directory claim is a promise about everything under it**,
+so a later file added there needs no entry of its own; name the files when
+you mean the files, and the directory only when the patch owns all of it.
 
 1. **CI** — `.github/workflows/miniship.yml` runs `go vet` and `go test` with
    Postgres on every push and pull request to `miniship`.
@@ -116,13 +118,17 @@ as written.
     `miniship/` parses this file; CI checks out the whole history so its tests
     can compare the branch with the fork point, and also runs on a
     `rebase/...` branch so a rebase is checked before it replaces `miniship`.
-    Paths: `MINISHIP.md`, `miniship/`, `.github/workflows/miniship.yml`
+    Paths: `MINISHIP.md`, `miniship/record.go`, `miniship/record_test.go`,
+    `.github/workflows/miniship.yml`
 11. **The binary names its upstream tag** — upstream's fallback version is
-    `2.0.0`, and miniship's image is built without the `-ldflags` that replace
-    it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
-    `2.4.2+miniship` now, and `cmd/version_miniship_test.go` holds it to the
-    fork point above, so a rebase that moves one and not the other is red.
-    Paths: `helpers/prest.go`, `cmd/version_miniship_test.go`
+    `2.0.0`, and the public monorepo builds this with no `-ldflags` that
+    replace it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
+    `2.4.2+miniship` now, set by an `init` in a file of miniship's own rather
+    than by editing upstream's literal, which upstream moves on every version
+    bump and would conflict on every rebase. `cmd/version_miniship_test.go`
+    holds it to the fork point above, so a rebase that moves one and not the
+    other is red.
+    Paths: `helpers/version_miniship.go`, `cmd/version_miniship_test.go`
 
 ## Taking an upstream fix
 
