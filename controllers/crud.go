@@ -1,14 +1,19 @@
 package controllers
 
 import (
+	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 
 	"github.com/prest/prest/v2/adapters"
 	pctx "github.com/prest/prest/v2/context"
 	"github.com/prest/prest/v2/controllers/auth"
+	"github.com/prest/prest/v2/internal/logsafe"
 	"github.com/prest/prest/v2/middlewares"
 
 	"github.com/lib/pq"
@@ -29,6 +34,8 @@ type CRUDHandler struct {
 	// miniship: the Databases rest was given, one adapter each. Nil is
 	// upstream's one-adapter shape, which the fields above serve.
 	registry adapters.Registry
+	// miniship: the limits every table read is held to (#549).
+	bounds QueryBounds
 }
 
 // servedSchema is the one schema rest serves (miniship). A Project's own
@@ -48,6 +55,7 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		roles:    deps.Roles,
 		reader:   deps.Reader,
 		registry: deps.AdapterRegistry,
+		bounds:   deps.Bounds.withDefaults(),
 	}
 }
 
@@ -67,7 +75,6 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
-	queries := r.URL.Query()
 
 	// miniship: a database rest was not given is not found, as a route rest
 	// does not have is not found. Upstream answers 400.
@@ -88,6 +95,26 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("schema not served: %v", schema), http.StatusNotFound)
 		return
 	}
+
+	// miniship: the query string, reviewed, before anything is built and
+	// before any connection is opened. query_screen.go is the second wall;
+	// what the builders below read is the query it rebuilt, never the
+	// caller's own (#549).
+	if len(r.URL.RawQuery) > h.bounds.MaxQueryLen {
+		jsonError(w, queryTooLong, http.StatusRequestURITooLong)
+		return
+	}
+	screened, err := screenTableRead(r.URL.Query(), h.bounds)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// asAsked is the request as it arrived, kept for the cache alone: the
+	// cache middleware looks an answer up under that key on the way in, so
+	// writing it under the screened one would never hit.
+	asAsked := r
+	r = withQuery(r, screened)
+	queries := screened
 
 	// miniship: the role, before anything is built. There is no default, and
 	// it is this Database's own: the adapter chosen above answers for it.
@@ -217,37 +244,80 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	}
 	sc := runQuery(ctx, role, sqlSelect, values...)
 	if err = sc.Err(); err != nil {
-		log.Errorln(err)
-		// miniship: a role that could not be entered served nothing, and says
-		// only that; the driver's own words stay in the log.
-		if errors.Is(err, adapters.ErrRoleNotEntered) || errors.Is(err, adapters.ErrNoAnonymousRole) {
-			jsonError(w, adapters.ErrRoleNotEntered.Error(), http.StatusInternalServerError)
-			return
-		}
-		// miniship: the database refused the role this read became.
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == insufficientPrivilege {
-			jsonError(w, pqErr.Message, http.StatusForbidden)
-			return
-		}
-		if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
-			jsonError(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		// miniship (#549): the detail goes to the log, redacted, and never to
+		// the caller. #545 found upstream answering with the driver's own
+		// error, the Database's host and port included.
+		log.Errorln(logsafe.Error(err))
+		status, message := readFailure(err, table)
+		jsonError(w, message, status)
 		return
 	}
 
 	if r.Method == "GET" && h.cache != nil {
-		h.cache.BuntSet(middlewares.CacheKey(r), string(sc.Bytes()))
+		h.cache.BuntSet(middlewares.CacheKey(asAsked), string(sc.Bytes()))
 	}
 	//nolint
 	w.Write(sc.Bytes())
 }
 
-// insufficientPrivilege is Postgres's SQLSTATE for a privilege the current
-// role does not hold.
-const insufficientPrivilege = "42501"
+// The SQLSTATEs a table read turns into an answer of its own (miniship).
+const (
+	// insufficientPrivilege is a privilege the current role does not hold.
+	insufficientPrivilege = "42501"
+	// undefinedTable is a relation that is not there, or that the role cannot
+	// see; queryCanceled is a statement stopped by statement_timeout.
+	undefinedTable  = "42P01"
+	undefinedColumn = "42703"
+	queryCanceled   = "57014"
+)
+
+// readFailure is the answer a failed read gives: a status and a message that
+// is the same for every caller and every Database (miniship, #549). Nothing
+// here is built from the driver's words except the one message #546 kept —
+// Postgres's own account of a privilege the anonymous role lacks, which names
+// the relation and nothing about where the Database is.
+func readFailure(err error, table string) (int, string) {
+	switch {
+	case errors.Is(err, adapters.ErrRoleNotEntered), errors.Is(err, adapters.ErrNoAnonymousRole):
+		return http.StatusInternalServerError, adapters.ErrRoleNotEntered.Error()
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, timeLimitMessage
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		switch pqErr.Code {
+		case insufficientPrivilege:
+			return http.StatusForbidden, pqErr.Message
+		case undefinedTable:
+			return http.StatusNotFound, "no such table"
+		case undefinedColumn:
+			return http.StatusBadRequest, "no such column"
+		case queryCanceled:
+			return http.StatusGatewayTimeout, timeLimitMessage
+		}
+		return http.StatusBadRequest, "the read could not be run"
+	}
+	// Upstream's own shape, kept so a Scanner that carries a plain error still
+	// answers 404 for a relation that is not there.
+	if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, servedSchema, table)) {
+		return http.StatusNotFound, "no such table"
+	}
+	// The Database not answering: refused, unreachable, closed mid-read. What
+	// the driver would have said is where it is, so none of it is repeated.
+	var netErr net.Error
+	if errors.As(err, &netErr) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) {
+		return http.StatusBadGateway, "the Database could not be read"
+	}
+	// Everything left is rest's own fault, not the Database's, and saying so
+	// is the difference between an operator looking at the right thing and the
+	// wrong one.
+	return http.StatusInternalServerError, "the read could not be completed"
+}
+
+// timeLimitMessage is what a read cancelled by the time limit says. It is one
+// message for both the statement's own cancellation and the request deadline,
+// because a caller can do the same thing about either: ask for less.
+const timeLimitMessage = "the read ran past the time limit and was cancelled; ask for fewer rows or add a filter"
 
 // databaseInPath resolves the Database a request's path names to the adapter
 // registered for it, and returns that adapter's role and reader (miniship).

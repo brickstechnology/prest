@@ -131,21 +131,25 @@ func TestHandlerSet_ErrorAlreadyJSONPassthrough(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), `"error": "{`)
 }
 
-func TestHandlerSet_XMLRenderer(t *testing.T) {
+// miniship (#549): upstream let the caller pick the format with _renderer.
+// rest answers application/json, whatever the caller asks for.
+func TestHandlerSet_answersJSONWhateverRendererIsAskedFor(t *testing.T) {
 	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/?_renderer=xml", nil)
-	rec := httptest.NewRecorder()
+	for _, query := range []string{"", "?_renderer=xml", "?_renderer=json", "?_renderer=anything"} {
+		req := httptest.NewRequest(http.MethodGet, "/"+query, nil)
+		rec := httptest.NewRecorder()
 
-	HandlerSet().ServeHTTP(rec, req, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"name":"prest"}`))
-	})
+		HandlerSet().ServeHTTP(rec, req, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"name":"prest"}`))
+		})
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "application/xml", rec.Header().Get("Content-Type"))
-	require.Contains(t, rec.Body.String(), "<objects>")
-	require.Contains(t, rec.Body.String(), "prest")
+		require.Equal(t, http.StatusOK, rec.Code, query)
+		require.Equal(t, "application/json", rec.Header().Get("Content-Type"), query)
+		require.JSONEq(t, `{"name":"prest"}`, rec.Body.String(), query)
+		require.NotContains(t, rec.Body.String(), "<objects>", query)
+	}
 }
 
 func TestSetTimeoutToContext(t *testing.T) {

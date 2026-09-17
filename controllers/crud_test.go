@@ -188,7 +188,10 @@ func TestCRUDHandler_Select_TimeBucketClauseError(t *testing.T) {
 		DB:      mockDatabaseRegistry(ctrl),
 	})
 
-	req := crudRequest(http.MethodGet, "/prest-test/public/test?_time_bucket=2h", map[string]string{
+	// miniship (#549): _time_bucket is not a parameter rest serves, so the
+	// clause comes from the builder alone here. The handler's handling of it
+	// is what this subject is about, and that is unchanged.
+	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
 	rec := httptest.NewRecorder()
@@ -245,7 +248,9 @@ func TestCRUDHandler_Select_TimeBucketClauseSuccess(t *testing.T) {
 		DB:       mockDatabaseRegistry(ctrl),
 	})
 
-	req := crudRequest(http.MethodGet, "/prest-test/public/test?_groupby=status&_time_bucket=1h", map[string]string{
+	// miniship (#549): as above — _time_bucket is removed, and the clause the
+	// handler folds into the GROUP BY comes from the builder.
+	req := crudRequest(http.MethodGet, "/prest-test/public/test?_groupby=status", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
 	rec := httptest.NewRecorder()
@@ -1128,8 +1133,13 @@ func TestCRUDHandler_Select_ExecutorError(t *testing.T) {
 	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Contains(t, rec.Body.String(), "query failed")
+	// miniship (#549): upstream answered 400 with the driver's own words. A
+	// read that failed for a reason rest cannot name is rest's own fault until
+	// something says otherwise — a network error or a bad connection answers
+	// 502 instead, which app/error_body_test.go covers against a real socket.
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotContains(t, rec.Body.String(), "query failed")
+	require.Contains(t, rec.Body.String(), "the read could not be completed")
 }
 
 func TestCRUDHandler_Select_NoCacheOnHead(t *testing.T) {

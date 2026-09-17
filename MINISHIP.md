@@ -168,6 +168,36 @@ you mean the files, and the directory only when the patch owns all of it.
     `adapters/postgres/internal/connection/conn_test.go`,
     `adapters/postgres/internal/connection/application_name_test.go`,
     `integration/postgres/twoprojects/`, `.github/workflows/miniship.yml`
+15. **The query string is reviewed, and every read is bounded** — `rest` is the
+    one door the internet reaches directly, and four of pREST's six advisories
+    on this surface were the same class of mistake in `_select`, `_count` and
+    `_groupby`, each found after the last was patched. `controllers/query_screen.go`
+    now stands in front of upstream's builders and rebuilds the query string out
+    of the parameters it recognises, so they never see a byte it did not put
+    there: `_join`, `_or`, `_korder`, `_renderer`, `_time_bucket`, the
+    `:tsquery` and `:vecdist` filters and `_groupby`'s `->>having` and
+    function-expression forms are gone, and what is kept takes unqualified names
+    only — `_join` accepted `pg_catalog.pg_class` and was a live path out of
+    `public`. Reads are bounded: a page-size ceiling of 5000, capped rather than
+    refused and given to a read that asks for no page, and a 30s
+    `SET LOCAL statement_timeout` inside patch 5's transaction, answering 504.
+    A third bound, a 16KB ceiling on the query string itself, answers 414 and is
+    the one refusal that reads nothing of it. The four `ltree` operators go too:
+    on a text column `~` is a caller's POSIX regular expression. An error answer
+    is now one of a fixed set — upstream returned the driver's words, the
+    Database's host and port included — and quotes nothing of the request back.
+    [`docs/miniship/query-string.md`](docs/miniship/query-string.md) is the
+    review: every parameter, kept, restricted or removed, and why, with the
+    three bounds' figures and where each was taken from.
+    Paths: `docs/miniship/`, `controllers/query_screen.go`,
+    `controllers/query_screen_test.go`, `controllers/crud.go`,
+    `controllers/crud_test.go`, `controllers/deps.go`,
+    `controllers/helpers.go`, `adapters/postgres/anonymous_role.go`,
+    `config/config.go`, `middlewares/middlewares.go`,
+    `middlewares/middlewares_test.go`, `app/query_screen_test.go`,
+    `app/error_body_test.go`,
+    `integration/postgres/anonymousrole/query_bounds_test.go`,
+    `integration/postgres/anonymousrole/anonymous_role_test.go`
 
 ## Taking an upstream fix
 
@@ -278,7 +308,12 @@ this one did not — two commits is a small sample of what a release moves.
 deployed `prestd` through upstream's whole route table, and skip unless
 `make test-integration` has started one. They assert routes this fork removes,
 so that target is not run here. In `miniship.yml` they skip, 109 of them, and
-80 Postgres-backed tests run.
+**97** Postgres-backed tests run, measured on a CI runner rather than on a
+developer's machine. The first number is upstream's and moves with
+a rebase; the second is this branch's and moves whenever a patch adds a subject,
+so treat both as the last measurement rather than a promise. `miniship.yml`
+prints them on every run's summary, beside the line
+`integration/postgres/anonymousrole` prints about its own subjects.
 
 ## Upstream workflows, and which run here
 
