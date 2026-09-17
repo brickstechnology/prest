@@ -135,7 +135,10 @@ func exec(t *testing.T, db *sql.DB, statements string) {
 // restAs is rest as prestd composes it, given the test database once, under
 // alias, connecting as the login and reading as role. It runs with pREST's own
 // access list off, so what a caller receives is what the database allows.
-func restAs(t *testing.T, cfg *config.Prest, role string) *httptest.Server {
+//
+// miniship (#549): with is applied last, so a subject can compose rest with
+// its own read bounds.
+func restAs(t *testing.T, cfg *config.Prest, role string, with ...func(*config.Prest)) *httptest.Server {
 	t.Helper()
 	conf := *cfg
 	conf.Adapter = nil
@@ -158,6 +161,9 @@ func restAs(t *testing.T, cfg *config.Prest, role string) *httptest.Server {
 		MaxOpenConn: 2,
 		AnonRole:    role,
 	}}
+	for _, apply := range with {
+		apply(&conf)
+	}
 	a, err := app.New(&conf)
 	require.NoError(t, err)
 	server := httptest.NewServer(a.Handler)

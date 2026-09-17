@@ -130,6 +130,33 @@ you mean the files, and the directory only when the patch owns all of it.
     other is red.
     Paths: `helpers/version_miniship.go`, `cmd/version_miniship_test.go`
 
+12. **The query string is reviewed, and every read is bounded** — `rest` is the
+    one door the internet reaches directly, and four of pREST's six advisories
+    on this surface were the same class of mistake in `_select`, `_count` and
+    `_groupby`, each found after the last was patched. `controllers/query_screen.go`
+    now stands in front of upstream's builders and rebuilds the query string out
+    of the parameters it recognises, so they never see a byte it did not put
+    there: `_join`, `_or`, `_korder`, `_renderer`, `_time_bucket`, the
+    `:tsquery` and `:vecdist` filters and `_groupby`'s `->>having` and
+    function-expression forms are gone, and what is kept takes unqualified names
+    only — `_join` accepted `pg_catalog.pg_class` and was a live path out of
+    `public`. Reads are bounded: a page-size ceiling of 5000, capped rather than
+    refused and given to a read that asks for no page, and a 30s
+    `SET LOCAL statement_timeout` inside patch 5's transaction, answering 504.
+    An error answer is now one of a fixed set — upstream returned the driver's
+    words, the Database's host and port included. `docs/miniship/query-string.md`
+    is the review: every parameter, kept, restricted or removed, and why, with
+    the two bounds' figures and where each was taken from.
+    Paths: `docs/miniship/`, `controllers/query_screen.go`,
+    `controllers/query_screen_test.go`, `controllers/crud.go`,
+    `controllers/crud_test.go`, `controllers/deps.go`,
+    `controllers/helpers.go`, `adapters/postgres/anonymous_role.go`,
+    `config/config.go`, `middlewares/middlewares.go`,
+    `middlewares/middlewares_test.go`, `app/query_screen_test.go`,
+    `app/error_body_test.go`,
+    `integration/postgres/anonymousrole/query_bounds_test.go`,
+    `integration/postgres/anonymousrole/anonymous_role_test.go`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

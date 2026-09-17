@@ -106,6 +106,14 @@ type Prest struct {
 	PGSSLKey             string
 	PGSSLRootCert        string
 	PGAnonRole           string // miniship: the role a read of PGDatabase becomes, with no default
+	// miniship (#549): the bounds every table read is held to.
+	// PGMaxPageSize is the largest page rest serves; a larger request is
+	// capped to it, and a read that asks for no page is given it.
+	// PGStatementTimeoutMS is set per transaction with SET LOCAL
+	// statement_timeout, so a statement that runs past it is cancelled by the
+	// Database itself. docs/miniship/query-string.md says where both came from.
+	PGMaxPageSize        int
+	PGStatementTimeoutMS int
 	ContextPath          string
 	PGMaxIdleConn        int
 	PGMaxOpenConn        int

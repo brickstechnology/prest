@@ -20,6 +20,9 @@ func setPostgresDefaults(v *viper.Viper) {
 	v.SetDefault("pg.maxidleconn", 0) // avoids db memory leak on req timeout
 	v.SetDefault("pg.maxopenconn", 10)
 	v.SetDefault("pg.conntimeout", 10)
+	// miniship (#549): the read bounds. See docs/miniship/query-string.md.
+	v.SetDefault("pg.max_page_size", 5000)
+	v.SetDefault("pg.statement_timeout_ms", 30000)
 	v.SetDefault("pg.cache", true)
 	// todo: replace this with prefer, will need to replace lib/pq
 	// https://github.com/jackc/pgx/blob/47d631e34be7128997a0aa89b75885cc4ad4c82e/pgconn/config.go#L218
@@ -78,6 +81,15 @@ func parseDBConfig(v *viper.Viper, cfg *Prest) error {
 		return err
 	}
 	cfg.PGConnTimeout, err = configuredInt(v, "pg.conntimeout")
+	if err != nil {
+		return err
+	}
+	// miniship (#549): the read bounds.
+	cfg.PGMaxPageSize, err = configuredInt(v, "pg.max_page_size")
+	if err != nil {
+		return err
+	}
+	cfg.PGStatementTimeoutMS, err = configuredInt(v, "pg.statement_timeout_ms")
 	if err != nil {
 		return err
 	}

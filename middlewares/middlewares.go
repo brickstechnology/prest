@@ -46,11 +46,16 @@ func HandlerSet() negroni.Handler {
 			next(w, r)
 			return
 		}
-		format := r.URL.Query().Get("_renderer")
+		// miniship (#549): rest answers application/json and nothing else.
+		// Upstream let `_renderer=xml` run every answer, errors included,
+		// through a JSON-to-XML converter; the review removed the parameter,
+		// so the format is not the caller's to choose. renderFormat's own
+		// switch is left in the tree, unreached, like the handlers behind the
+		// routes the fork removed, so a rebase does not conflict on it.
 		recorder := httptest.NewRecorder()
 		negroniResp := negroni.NewResponseWriter(recorder)
 		next(negroniResp, r)
-		renderFormat(w, recorder, format)
+		renderFormat(w, recorder, "")
 	})
 }
 
