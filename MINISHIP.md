@@ -71,19 +71,58 @@ as written.
    Postgres for a database `rest` was not given.
    Paths: `router/router.go`, `router/surface_test.go`, `app/surface_test.go`,
    `integration/postgres/router/surface_test.go`
-5. **This record, and the check on it** — a vendored copy takes an upstream
-   fix only when somebody notices it exists, so the fork point is written where
-   a program can read it and the branch is held to what is written.
-   `miniship/` parses this file; CI checks out the whole history so its tests
-   can compare the branch with the fork point, and also runs on a
-   `rebase/...` branch so a rebase is checked before it replaces `miniship`.
-   Paths: `MINISHIP.md`, `miniship/`, `.github/workflows/miniship.yml`
-6. **The binary names its upstream tag** — upstream's fallback version is
-   `2.0.0`, and miniship's image is built without the `-ldflags` that replace
-   it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
-   `2.4.2+miniship` now, and `cmd/version_miniship_test.go` holds it to the
-   fork point above, so a rebase that moves one and not the other is red.
-   Paths: `helpers/prest.go`, `cmd/version_miniship_test.go`
+5. **A read becomes the anonymous role** — upstream reads as the login it
+   connects with. The table read now opens a read-only transaction, runs
+   `SET LOCAL ROLE` to the database's configured role (`anon_role` on a
+   registry entry, `DATABASE_ANON_ROLE_<n>` beside its URL, or `pg.anon_role`
+   with no registry), reads, and rolls back. There is no default: a database
+   given no role answers 500, and so does a role that cannot be entered, and
+   neither reads as the login instead. A privilege the role lacks answers 403
+   in Postgres's words. `adapters/anonymous_role.go` holds the two new
+   interfaces, so upstream's `QueryExecutor` and its mocks are unchanged.
+   `rest` runs with pREST's own access list off (`access.restrict = false`),
+   so the database's grants and row security decide which rows arrive.
+   `integration/postgres/anonymousrole` asks a real Postgres for rows the role
+   may not have, and prints how many of its subjects got that Postgres;
+   `miniship.yml` fails when that line is missing.
+   Paths: `adapters/anonymous_role.go`, `adapters/postgres/anonymous_role.go`,
+   `adapters/timescaledb/anonymous_role.go`, `config/config.go`,
+   `config/database_registry.go`, `config/anonymous_role_test.go`,
+   `controllers/crud.go`, `controllers/crud_test.go`,
+   `controllers/crud_anonymous_role_test.go`, `controllers/deps.go`,
+   `app/surface_test.go`, `integration/postgres/anonymousrole/`,
+   `integration/postgres/router/surface_test.go`,
+   `.github/workflows/miniship.yml`
+6. **`public` alone** — the table read answers 404 for any other schema,
+   before any SQL is built.
+   Paths: `controllers/crud.go`, `controllers/crud_anonymous_role_test.go`,
+   `app/surface_test.go`
+7. **CORS for reads only** — the defaults allow any origin `GET`, `HEAD` and
+   `OPTIONS`, and never credentials. Upstream allowed the write verbs, with
+   credentials.
+   Paths: `config/config.go`, `config/anonymous_role_test.go`
+8. **`prestd health`** — asks the server in the same container for `/_health`
+   on loopback, or at the address it is given, and exits 0 on 200, because the
+   image carries no shell and no HTTP client for a container health check to
+   run.
+   Paths: `cmd/health.go`, `cmd/health_test.go`, `cmd/root.go`
+9. **A bounded pool for an environment registry entry** — upstream gave a
+   `DATABASE_URL_<n>` entry 0 open connections, which `database/sql` reads as
+   no limit. It now takes `pg.maxopenconn` and `pg.maxidleconn`.
+   Paths: `config/database_registry.go`, `config/anonymous_role_test.go`
+10. **This record, and the check on it** — a vendored copy takes an upstream
+    fix only when somebody notices it exists, so the fork point is written where
+    a program can read it and the branch is held to what is written.
+    `miniship/` parses this file; CI checks out the whole history so its tests
+    can compare the branch with the fork point, and also runs on a
+    `rebase/...` branch so a rebase is checked before it replaces `miniship`.
+    Paths: `MINISHIP.md`, `miniship/`, `.github/workflows/miniship.yml`
+11. **The binary names its upstream tag** — upstream's fallback version is
+    `2.0.0`, and miniship's image is built without the `-ldflags` that replace
+    it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
+    `2.4.2+miniship` now, and `cmd/version_miniship_test.go` holds it to the
+    fork point above, so a rebase that moves one and not the other is red.
+    Paths: `helpers/prest.go`, `cmd/version_miniship_test.go`
 
 ## Taking an upstream fix
 

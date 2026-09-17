@@ -42,6 +42,11 @@ type Deps struct {
 	PGDatabase         string
 	Auth               AuthConfig
 	Expose             config.ExposeConf
+
+	// miniship: the role each database's reads become, and the reader that
+	// becomes it. Nil refuses the table read rather than reading as the login.
+	Roles  adapters.AnonymousRoles
+	Reader adapters.RoleReader
 }
 
 // NewDepsFromConfig builds handler dependencies from application config.
@@ -50,6 +55,10 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 	if p.Cache.Enabled {
 		cacher = &p.Cache
 	}
+	// miniship: an adapter that cannot read as a role leaves these nil, and
+	// the table read then refuses rather than reading as the login.
+	roles, _ := p.Adapter.(adapters.AnonymousRoles)
+	reader, _ := p.Adapter.(adapters.RoleReader)
 	var queryRegistry adapters.QueryRegistry
 	var scriptPerms adapters.ScriptPermissionsChecker
 	if reg, ok := p.Adapter.(adapters.QueryRegistry); ok {
@@ -68,6 +77,8 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 		QueryRegistry: queryRegistry,
 		ScriptPerms:   scriptPerms,
 		DB:            p.Adapter,
+		Roles:         roles,
+		Reader:        reader,
 		Pinger:        p.Adapter,
 		Readiness:     p.Adapter,
 		Cache:         cacher,
