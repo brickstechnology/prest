@@ -25,6 +25,30 @@ One line for each change on `miniship`, oldest first.
 
 1. **CI** — `.github/workflows/miniship.yml` runs `go vet` and `go test` with
    Postgres on every push and pull request to `miniship`.
+2. **A database `rest` was not given is refused** — without a registry,
+   upstream tried any path segment as a database of that name on its one
+   configured host. `connection.Manager` now resolves a registry alias or the
+   configured database and nothing else, `IsRegistered` agrees, and the table
+   read answers such a name 404 without opening a connection.
+3. **The health answer touches no `Database`** — upstream's `/_health` pinged
+   the default database, which would keep a suspended compute awake.
+   `DefaultCheckList` is empty.
+4. **Two routes** — of the 26 that `router.RegisterRoutes` registers upstream,
+   `rest` keeps `GET /{database}/{schema}/{table}` and `GET /_health`, and a
+   method the table path does not serve answers 404 rather than 405. The
+   handlers behind the removed routes stay in the tree, unrouted, so a rebase
+   does not conflict on them. `router/surface_test.go` walks the router and
+   fails on a third route; `app/surface_test.go` sends a request of every
+   removed shape; `integration/postgres/router/surface_test.go` asks a real
+   Postgres for a database `rest` was not given.
+
+## Upstream's tests that do not run here
+
+`integration/suites/...` and parts of `integration/postgres/...` drive a
+deployed `prestd` through upstream's whole route table, and skip unless
+`make test-integration` has started one. They assert routes this fork removes,
+so that target is not run here. In `miniship.yml` they skip, 109 of them, and
+80 Postgres-backed tests run.
 
 ## Upstream workflows, and which run here
 
