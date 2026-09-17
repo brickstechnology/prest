@@ -129,8 +129,46 @@ you mean the files, and the directory only when the patch owns all of it.
     holds it to the fork point above, so a rebase that moves one and not the
     other is red.
     Paths: `helpers/version_miniship.go`, `cmd/version_miniship_test.go`
-
-12. **The query string is reviewed, and every read is bounded** — `rest` is the
+12. **One `rest` serves two `Database`s** — upstream's
+    `AdapterSelectorMiddleware` wrapped the router from outside it, where
+    `mux` has not matched and `mux.Vars` is empty, so it never saw
+    `{database}` and every read ran on whichever adapter the registry's map
+    handed back first. The table read now resolves the path's `Database` in
+    the handler, once the route has matched, and reads on the adapter
+    registered for it. Each adapter is also given that one entry as its whole
+    registry, so it can resolve no other `Database`: a read that reached the
+    wrong adapter is refused rather than quietly answered from the right
+    connection. The middleware stays in the tree, unused, as the removed
+    routes' handlers do.
+    Paths: `app/app.go`, `app/app_test.go`, `app/two_projects_test.go`,
+    `controllers/crud.go`, `integration/postgres/twoprojects/`
+13. **Composing `rest` opens no connection** — `app.New` connected to and
+    pinged every registry entry at start-up, and probed TimescaleDB first,
+    which is a second connection to each. At 250 `Project`s that woke 250
+    computes against a ceiling of 20 concurrently active, before a caller had
+    asked for anything, and one unreachable entry stopped the other 249 being
+    served at all. An adapter is now created unconnected and its pool fills on
+    the first call that names its `Database`; the current database an adapter
+    answers for, which upstream set as a side effect of connecting, is set at
+    construction instead. TimescaleDB is not detected, because detecting it
+    *is* that connection and `rest` serves a `Project`'s `public` schema over
+    one grammar; `timescaledb` stays in the tree for a rebase.
+    Paths: `app/app.go`, `app/app_test.go`, `app/two_projects_test.go`,
+    `integration/postgres/twoprojects/`
+14. **`rest`'s connections say who they are** — every connection the pool
+    opens carries lib/pq's `fallback_application_name=rest`, so a `Database`
+    can tell its `rest` sessions from every other one in `pg_stat_activity`.
+    A fallback, so an operator who names their own keeps it; added where the
+    connection is opened rather than in the URI the pool is keyed by, because
+    what `rest` calls itself is not part of which `Database` a pooled
+    connection is to. `miniship.yml` reads the live-Postgres line from both
+    of `rest`'s integration packages now, not one.
+    Paths: `adapters/postgres/application_name.go`,
+    `adapters/postgres/internal/connection/conn.go`,
+    `adapters/postgres/internal/connection/conn_test.go`,
+    `adapters/postgres/internal/connection/application_name_test.go`,
+    `integration/postgres/twoprojects/`, `.github/workflows/miniship.yml`
+15. **The query string is reviewed, and every read is bounded** — `rest` is the
     one door the internet reaches directly, and four of pREST's six advisories
     on this surface were the same class of mistake in `_select`, `_count` and
     `_groupby`, each found after the last was patched. `controllers/query_screen.go`

@@ -117,7 +117,11 @@ func TestNew(t *testing.T) {
 			},
 		},
 		{
-			name: "connect error when adapter is nil",
+			// miniship: upstream connected here and this case expected the
+			// error (miniship-cloud#547). Composing rest reaches no Database,
+			// so an unreachable one is not a failure until something asks for
+			// it; app/two_projects_test.go counts that at the socket.
+			name: "no connect error when adapter is nil and the database is unreachable",
 			setup: func(t *testing.T) *config.Prest {
 				return &config.Prest{
 					PGHost:     "invalid-host",
@@ -127,7 +131,6 @@ func TestNew(t *testing.T) {
 					PGSSLMode:  "disable",
 				}
 			},
-			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
@@ -458,7 +461,11 @@ func TestNew_DetectAdapter_PostgresFallback(t *testing.T) {
 	require.False(t, isTS)
 }
 
-func TestNew_DetectAdapter_TimescaleDB(t *testing.T) {
+// miniship: upstream detected TimescaleDB here, and detecting it is a
+// connection — to every registry entry, at start-up (miniship-cloud#547). rest
+// serves a Project's public schema over one grammar, so the postgres adapter
+// is the adapter, whatever the database turns out to be running.
+func TestNew_DetectAdapter_TimescaleIsNotProbedFor(t *testing.T) {
 	stubTimescaleConnect(t)
 
 	cfg := connectablePrest("prest")
@@ -466,7 +473,7 @@ func TestNew_DetectAdapter_TimescaleDB(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	_, isTS := cfg.Adapter.(*timescaledb.Adapter)
-	require.True(t, isTS)
+	require.False(t, isTS)
 }
 
 func TestNew_DetectAdapter_DefaultAliasWhenPGDatabaseEmpty(t *testing.T) {
@@ -493,7 +500,10 @@ func TestNew_MultiDatabase_PostgresFallback(t *testing.T) {
 	require.True(t, got.Adapters.IsRegistered("tenant-b"))
 }
 
-func TestNew_MultiDatabase_TimescaleDB(t *testing.T) {
+// miniship: a registry entry gets the postgres adapter, unprobed, for the
+// reason above — and at 250 entries the probe was 250 connections nobody asked
+// for (miniship-cloud#547).
+func TestNew_MultiDatabase_TimescaleIsNotProbedFor(t *testing.T) {
 	stubTimescaleConnect(t)
 
 	cfg := &config.Prest{
@@ -505,7 +515,7 @@ func TestNew_MultiDatabase_TimescaleDB(t *testing.T) {
 	adapter, err := got.Adapters.Get("metrics")
 	require.NoError(t, err)
 	_, isTS := adapter.(*timescaledb.Adapter)
-	require.True(t, isTS)
+	require.False(t, isTS)
 }
 
 func TestNew_MultiDatabase_WithURL(t *testing.T) {
@@ -519,17 +529,25 @@ func TestNew_MultiDatabase_WithURL(t *testing.T) {
 	require.True(t, got.Adapters.IsRegistered("url-db"))
 }
 
-func TestNew_MultiDatabase_ConnectError(t *testing.T) {
+// miniship: upstream failed to compose when an entry would not connect, and
+// this case expected that error (miniship-cloud#547). A Database that is
+// unreachable — or asleep — is not a failure until a caller names it, which is
+// the whole of *a Project nobody calls costs nothing*: the other 249 answer
+// while this one does not.
+func TestNew_MultiDatabase_ComposesThoughAnEntryWillNotConnect(t *testing.T) {
+	var connects int
 	stubDBConnect(t, func(_, _ string) (*sqlx.DB, error) {
+		connects++
 		return nil, errors.New("connect failed")
 	})
 
 	cfg := &config.Prest{
 		Databases: []config.DatabaseConf{baseDBConf("broken")},
 	}
-	_, err := app.New(cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to connect to database broken")
+	got, err := app.New(cfg)
+	require.NoError(t, err)
+	require.True(t, got.Adapters.IsRegistered("broken"))
+	require.Zero(t, connects, "composing rest opened a connection")
 }
 
 func TestNew_MultiDatabase_EmptyAlias(t *testing.T) {

@@ -31,7 +31,11 @@ type CRUDHandler struct {
 	singleDB bool
 	roles    adapters.AnonymousRoles
 	reader   adapters.RoleReader
-	bounds   QueryBounds
+	// miniship: the Databases rest was given, one adapter each. Nil is
+	// upstream's one-adapter shape, which the fields above serve.
+	registry adapters.Registry
+	// miniship: the limits every table read is held to (#549).
+	bounds QueryBounds
 }
 
 // servedSchema is the one schema rest serves (miniship). A Project's own
@@ -50,6 +54,7 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		singleDB: deps.SingleDB,
 		roles:    deps.Roles,
 		reader:   deps.Reader,
+		registry: deps.AdapterRegistry,
 		bounds:   deps.Bounds.withDefaults(),
 	}
 }
@@ -62,6 +67,9 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 // is never run as the login instead. pREST's own access list is not what
 // protects a row here: rest runs with access.restrict off, so the database's
 // grants and row security decide.
+//
+// The Database is chosen here, from the matched route, and the adapter holding
+// it is what the read runs on (miniship-cloud#547).
 func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	vars := pathVars(r)
 	database := vars["database"]
@@ -70,7 +78,8 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 
 	// miniship: a database rest was not given is not found, as a route rest
 	// does not have is not found. Upstream answers 400.
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	roles, reader, err := h.databaseInPath(database)
+	if err != nil {
 		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -90,7 +99,7 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	// miniship: the query string, reviewed, before anything is built and
 	// before any connection is opened. query_screen.go is the second wall;
 	// what the builders below read is the query it rebuilt, never the
-	// caller's own.
+	// caller's own (#549).
 	if len(r.URL.RawQuery) > h.bounds.MaxQueryLen {
 		jsonError(w, queryTooLong, http.StatusRequestURITooLong)
 		return
@@ -107,9 +116,10 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	r = withQuery(r, screened)
 	queries := screened
 
-	// miniship: the role, before anything is built. There is no default.
-	role, ok := h.anonymousRole(database)
-	if !ok || h.reader == nil {
+	// miniship: the role, before anything is built. There is no default, and
+	// it is this Database's own: the adapter chosen above answers for it.
+	role, ok := anonymousRole(roles, database)
+	if !ok || reader == nil {
 		jsonError(w, adapters.ErrNoAnonymousRole.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -228,9 +238,9 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	runQuery := h.reader.QueryAsRoleCtx
+	runQuery := reader.QueryAsRoleCtx
 	if countFirst {
-		runQuery = h.reader.QueryCountAsRoleCtx
+		runQuery = reader.QueryCountAsRoleCtx
 	}
 	sc := runQuery(ctx, role, sqlSelect, values...)
 	if err = sc.Err(); err != nil {
@@ -309,12 +319,45 @@ func readFailure(err error, table string) (int, string) {
 // because a caller can do the same thing about either: ask for less.
 const timeLimitMessage = "the read ran past the time limit and was cancelled; ask for fewer rows or add a filter"
 
+// databaseInPath resolves the Database a request's path names to the adapter
+// registered for it, and returns that adapter's role and reader (miniship).
+//
+// **One adapter holds one Database**: its pool, and the anonymous role reads of
+// it become. Choosing it here, after the router has matched, is what makes one
+// rest serve two Projects — and, with the adapter given that Database alone,
+// what makes a Project's rows unreachable through another Project's
+// connection. Upstream chose in AdapterSelectorMiddleware, which ran outside
+// the router where mux.Vars is empty, so it never saw {database} and every
+// read used whichever adapter the registry's map handed back first.
+//
+// A Database rest was not given has no adapter, and is not found.
+//
+// With no registry there is upstream's one adapter and upstream's checks on
+// the name, pg.single among them. pg.single is about that shape: it asks
+// whether the name is the one physical database this process connected to, and
+// a registry answers that question by alias instead.
+func (h *CRUDHandler) databaseInPath(database string) (adapters.AnonymousRoles, adapters.RoleReader, error) {
+	if h.registry == nil {
+		if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+			return nil, nil, err
+		}
+		return h.roles, h.reader, nil
+	}
+	adapter, err := h.registry.Get(database)
+	if err != nil {
+		return nil, nil, fmt.Errorf("database not registered: %v", database)
+	}
+	roles, _ := adapter.(adapters.AnonymousRoles)
+	reader, _ := adapter.(adapters.RoleReader)
+	return roles, reader, nil
+}
+
 // anonymousRole returns the role reads of database become.
-func (h *CRUDHandler) anonymousRole(database string) (string, bool) {
-	if h.roles == nil {
+func anonymousRole(roles adapters.AnonymousRoles, database string) (string, bool) {
+	if roles == nil {
 		return "", false
 	}
-	return h.roles.AnonymousRole(database)
+	return roles.AnonymousRole(database)
 }
 
 // Insert performs an INSERT on a table.

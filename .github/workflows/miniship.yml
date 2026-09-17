@@ -84,16 +84,28 @@ jobs:
       # A green with every database test skipped looks like a green with every
       # one run, so the count goes on the run's summary, whatever happened.
       #
-      # rest's own subjects (integration/postgres/anonymousrole) print one
-      # line: how many needed a live Postgres and how many got one. That
-      # package fails when the two differ; this step fails when the line is
-      # missing, so a run that never reached them is not a pass either.
+      # rest's own subjects print one line each: how many needed a live
+      # Postgres and how many got one. Each of those packages fails when the
+      # two differ; this step fails when a line is missing, so a run that never
+      # reached one of them is not a pass either. There is one line per
+      # package, and REST_CENSUS_PACKAGES is how many packages print one —
+      # integration/postgres/anonymousrole and integration/postgres/twoprojects.
       - name: how many database tests ran, and how many skipped
         if: always()
+        env:
+          REST_CENSUS_PACKAGES: "2"
         run: |
           ran="$(grep -c -E '^--- (PASS|FAIL):' integration.log || true)"
           skipped="$(grep -c -E '^--- SKIP:' integration.log || true)"
           echo "integration: ${ran} top-level tests ran, ${skipped} skipped" | tee -a "$GITHUB_STEP_SUMMARY"
-          census="$(grep -E '^rest: [0-9]+ subjects needed a live Postgres, [0-9]+ got one$' integration.log || true)"
-          echo "${census:-rest: the live-Postgres line is missing, so its subjects did not run}" | tee -a "$GITHUB_STEP_SUMMARY"
-          test -n "$census"
+          grep -E '^rest: [0-9]+ subjects needed a live Postgres, [0-9]+ got one$' integration.log > census.txt || true
+          lines="$(grep -c '' census.txt || true)"
+          if [ "${lines}" -eq 0 ]; then
+            echo "rest: the live-Postgres line is missing, so its subjects did not run" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          tee -a "$GITHUB_STEP_SUMMARY" < census.txt
+          if [ "${lines}" -ne "${REST_CENSUS_PACKAGES}" ]; then
+            echo "rest: ${REST_CENSUS_PACKAGES} packages report a live-Postgres line and ${lines} did, so one did not run" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
