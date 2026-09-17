@@ -38,33 +38,50 @@ type App struct {
 
 // New builds a ready-to-serve App from cfg.
 //
-// Creates and registers adapters for each configured database. If cfg.Adapter is nil
-// and no database registry is configured, detects and creates a default adapter.
+// Creates and registers an adapter for each configured database. If cfg.Adapter
+// is nil and no database registry is configured, a default adapter is created.
 // Handlers, CRUD middleware, routes, global middleware, and plugins are wired into
 // a single http.Handler.
 //
-// In registry mode an entry that is unreachable at startup is served by a lazy
-// adapter (it connects on first use) and skipped by startup migrations.
-//
-// Returns an error when the database connection cannot be established: in
-// no-registry mode on any failure, in registry mode on configuration
-// errors or when no entry is reachable.
+// miniship: composing rest opens no connection to any Database
+// (miniship-cloud#547). Upstream connects to and pings every registry entry
+// here (an entry it cannot reach is served lazily), and probes TimescaleDB
+// when there is no registry; at 250 Projects that woke 250 computes against a
+// ceiling of 20 concurrently active, before a caller had asked for anything.
+// Each adapter is created unconnected and its pool fills on the first call
+// that names its Database, which is the property ADR 0017 rests on: a Project
+// nobody calls costs nothing. registerDatabases, connectAdapterForDatabase and
+// detectAndCreateAdapter stay in the tree, unused, for an upstream rebase.
 func New(cfg *config.Prest) (*App, error) {
 	registry := adapters.NewRegistry()
+	// miniship: nothing is reached at start-up, so nothing is unreachable.
 	var unreachable map[string]struct{}
 
-	// Multi-database mode: create adapter for each configured database
+	// Multi-database mode: create an adapter for each configured database
 	if cfg.HasDatabaseRegistry() {
-		var err error
-		if unreachable, err = registerDatabases(cfg, registry); err != nil {
-			return nil, err
+		// The default adapter below is this one, taken in the order the
+		// registry is configured in rather than from a map, so which Database
+		// answers a question asked of no Database in particular does not
+		// change between two runs of the same binary.
+		var first adapters.Adapter
+		for _, dbConf := range cfg.Databases {
+			adapter := createAdapterForDatabase(cfg, &dbConf)
+			if err := registry.Register(dbConf.Alias, adapter); err != nil {
+				return nil, err
+			}
+			if first == nil {
+				first = adapter
+			}
+			slog.Info("registered adapter for database", "alias", dbConf.Alias)
+		}
+		if cfg.Adapter == nil {
+			cfg.Adapter = first
 		}
 	} else if cfg.Adapter == nil {
-		// No registry: one adapter for pg.database; pg.allowed_databases share its host and credentials
-		adapter, err := detectAndCreateAdapter(cfg)
-		if err != nil {
-			return nil, err
-		}
+		// No registry: one adapter for pg.database; pg.allowed_databases share
+		// its host and credentials. miniship: created unconnected.
+		adapter := postgres.New(cfg)
+		setCurrentDatabase(adapter, cfg.PGDatabase)
 		cfg.Adapter = adapter
 		if err := registerServedAliases(registry, cfg, adapter); err != nil {
 			return nil, err
@@ -106,11 +123,14 @@ func New(cfg *config.Prest) (*App, error) {
 
 	mux := mux.NewRouter().StrictSlash(true)
 	router.RegisterRoutes(mux, cfg, h, crud, queryStack, adminStack, plg)
-	// After the match, so mux.Vars includes {database} before route middleware runs.
-	mux.Use(func(next http.Handler) http.Handler {
-		return middlewares.NewAdapterSelectorMiddleware(registry, next)
-	})
 
+	// miniship: the adapter is chosen inside the handler, from the matched
+	// route (miniship-cloud#547). pREST v2.4.2 wrapped the router in
+	// NewAdapterSelectorMiddleware outside it, where mux has not matched yet
+	// and mux.Vars is empty, so every read ran on whichever adapter came back
+	// first; upstream now installs it after the match. rest does not install
+	// it at all: the handler resolves the path's Database itself, and the
+	// middleware stays in the tree, unused, as the removed routes' handlers do.
 	n := middlewares.New(cfg)
 	n.UseHandler(mux)
 
@@ -519,4 +539,40 @@ func lazyAdapterForDatabase(dbCfg *config.Prest, dbConf *config.DatabaseConf) ad
 	// Same database selection postgres.Connect would have made.
 	pg.SetDatabase(dbCfg.PGDatabase)
 	return pg
+}
+
+// createAdapterForDatabase creates an unconnected adapter for one registry
+// entry. Every database uses the postgres adapter.
+//
+// miniship: two things went from upstream's connectAdapterForDatabase
+// (miniship-cloud#547). The adapter is not connected, so composing rest
+// touches no Database; and TimescaleDB is not detected, because detecting it
+// *is* a connection, one to every entry, at start-up, before the fallback
+// opens a second. rest serves a Project's public schema over one grammar, and
+// the timescaledb adapter remains in the tree for an upstream rebase.
+//
+// The entry's own registry is what the adapter is given: this adapter holds
+// this Database and can resolve no other, so a read that reached the wrong
+// adapter is refused rather than quietly answered from the right connection.
+func createAdapterForDatabase(cfg *config.Prest, dbConf *config.DatabaseConf) adapters.Adapter {
+	// A config scoped to this database, upstream's scopedConfig.
+	dbCfg := scopedConfig(cfg, dbConf)
+	dbCfg.Databases = []config.DatabaseConf{*dbConf}
+
+	adapter := postgres.New(&dbCfg)
+	setCurrentDatabase(adapter, dbConf.Database)
+	slog.Info("using postgres adapter for database", "alias", dbConf.Alias)
+	return adapter
+}
+
+// setCurrentDatabase names the database an adapter answers for when a caller
+// names none.
+//
+// miniship: upstream sets it as a side effect of connecting at start-up. rest
+// does not connect at start-up, so it is set here, and the pool still fills on
+// the first call that needs it.
+func setCurrentDatabase(adapter adapters.Adapter, name string) {
+	if registry, ok := adapter.(adapters.DatabaseRegistry); ok {
+		registry.SetDatabase(name)
+	}
 }

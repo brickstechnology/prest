@@ -142,7 +142,6 @@ func restAs(t *testing.T, cfg *config.Prest, role string, with ...func(*config.P
 	t.Helper()
 	conf := *cfg
 	conf.Adapter = nil
-	conf.SingleDB = false
 	conf.Debug = false
 	conf.EnableDefaultJWT = false
 	conf.AuthEnabled = false

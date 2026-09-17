@@ -32,7 +32,6 @@ const reader = "rest_surface_reader"
 // integration/postgres/docker-compose.yml are not started by miniship.yml.
 func TestRest_readsTheDatabaseItWasGivenAndNoOther(t *testing.T) {
 	cfg := helpers.LoadTestConfig(t)
-	cfg.SingleDB = false
 	// As the stack runs rest: its own access list off, so the database's
 	// grants decide, and one role to become.
 	cfg.AccessConf = config.AccessConf{Restrict: false}
