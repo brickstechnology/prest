@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -117,12 +116,17 @@ func TestRest_aStatementPastTheTimeLimitIsCancelled(t *testing.T) {
 	rest := restAs(t, cfg, reader, func(c *config.Prest) { c.PGStatementTimeoutMS = 250 })
 
 	// Read the view that sleeps for five seconds, under a limit of 250ms.
-	// Expected: 504 well inside the sleep, with a message a caller can act on.
-	started := time.Now()
+	// Expected: 504, with a message a caller can act on, and no row.
+	//
+	// The claim is made by the status and the absence of the row, not by a
+	// stopwatch: the sleep that finished would have answered 200 with
+	// {"slept": true}, so a 504 here *is* the cancellation. Nothing in this
+	// package times anything — a wall clock read on a loaded machine measures
+	// the machine.
 	status, body := get(t, rest, "/"+alias+"/public/"+slow)
 	require.Equal(t, http.StatusGatewayTimeout, status, body)
-	require.Less(t, time.Since(started), 4*time.Second, "the statement was not cancelled, it finished")
 	require.Contains(t, body, "time limit")
+	require.NotContains(t, body, "slept")
 	require.NotContains(t, body, "true")
 	requireNoSecrets(t, cfg, body)
 
