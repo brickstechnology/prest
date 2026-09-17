@@ -778,7 +778,8 @@ func TestCRUDHandler_Select_UnregisteredDB(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.Select(rec, req)
 
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	// miniship: not found, where upstream answered 400.
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestCRUDHandler_Select_PermissionErrorOnFields(t *testing.T) {
@@ -1151,7 +1152,8 @@ func TestCRUDHandler_Select_SingleDBMismatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.Select(rec, req)
 
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	// miniship: not found, where upstream answered 400.
+	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), "database not registered")
 }
 
