@@ -2,11 +2,9 @@ package router
 
 import (
 	"net/http"
-	"runtime"
 
 	"github.com/prest/prest/v2/config"
 	"github.com/prest/prest/v2/controllers"
-	"github.com/prest/prest/v2/internal/studio"
 	"github.com/prest/prest/v2/middlewares"
 	"github.com/prest/prest/v2/plugins"
 
@@ -18,14 +16,25 @@ import (
 )
 
 // RegisterRoutes wires HTTP routes onto the given router.
+//
+// miniship: rest answers two routes, the table read and the health address.
+// pREST v2.4.2 registers 26 here: the database, schema and table listings, the
+// stored-query runner and its registry, Go plugins, the sign-in route, the MCP
+// door, Studio, readiness, the table description, the batch insert and every
+// write verb. rest does not register them at all, rather than guarding them,
+// because it is the one door of miniship the internet reaches directly.
+// router/surface_test.go walks the router and fails on a third route. The
+// handlers behind the removed routes stay in the tree, so an upstream rebase
+// does not conflict on them, and the parameters that fed them stay in this
+// signature, so the call sites upstream owns do not change.
 func RegisterRoutes(
 	router *mux.Router,
 	cfg *config.Prest,
 	h *controllers.Handlers,
 	crudStack *middlewares.CRUDStack,
-	queryStack *middlewares.QueryStack,
-	adminStack *middlewares.AdminQueryStack,
-	plg *plugins.Plugins,
+	_ *middlewares.QueryStack,
+	_ *middlewares.AdminQueryStack,
+	_ *plugins.Plugins,
 ) {
 	// When telemetry is enabled, tag each request span with its matched route
 	// template (http.route) so span/metric labels stay bounded to templates
@@ -34,53 +43,13 @@ func RegisterRoutes(
 		router.Use(otelRouteTagMiddleware)
 	}
 
-	// Every route except /auth, /_health, /_ready and the /_studio static
-	// assets must be registered behind a stack (crudRoute, catalogRoute,
-	// queryRoute, adminRoute or authRoute). The catalog routes once sat outside
-	// it and served metadata without a token (GHSA-fhf5-m388-4w4p).
-	catalogStack := middlewares.NewCatalogStack(cfg, cfg.Adapter)
+	// A write verb on the table path matches the path but not the method, and
+	// gorilla/mux answers that 405 with an Allow header: it tells a caller the
+	// path is served. rest answers it 404, as it answers every route it lacks.
+	router.MethodNotAllowedHandler = http.NotFoundHandler()
 
-	if cfg.AuthEnabled {
-		router.HandleFunc("/auth", h.Auth.Login).Methods("POST")
-	}
-	router.Handle("/_mcp", authRoute(cfg, h.MCP.Handler())).Methods("GET", "POST")
-	router.Handle("/databases", catalogRoute(catalogStack, h.Catalog.ListDatabases)).Methods("GET")
-	router.Handle("/schemas", catalogRoute(catalogStack, h.Catalog.ListSchemas)).Methods("GET")
-	router.Handle("/tables", catalogRoute(catalogStack, h.Catalog.ListTables)).Methods("GET")
-
-	if h.QueryRegistry != nil && adminStack != nil {
-		router.Handle("/_QUERIES/registry", adminRoute(adminStack, h.QueryRegistry.List)).Methods("GET")
-		router.Handle("/_QUERIES/registry", adminRoute(adminStack, h.QueryRegistry.Create)).Methods("POST")
-		router.Handle("/_QUERIES/registry/{database}", adminRoute(adminStack, h.QueryRegistry.List)).Methods("GET")
-		router.Handle("/_QUERIES/registry/{database}", adminRoute(adminStack, h.QueryRegistry.Create)).Methods("POST")
-		router.Handle("/_QUERIES/registry/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Get)).Methods("GET")
-		router.Handle("/_QUERIES/registry/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Update)).Methods("PUT")
-		router.Handle("/_QUERIES/registry/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Delete)).Methods("DELETE")
-		router.Handle("/_QUERIES/registry/{database}/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Get)).Methods("GET")
-		router.Handle("/_QUERIES/registry/{database}/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Update)).Methods("PUT")
-		router.Handle("/_QUERIES/registry/{database}/{location}/{name}", adminRoute(adminStack, h.QueryRegistry.Delete)).Methods("DELETE")
-	}
-
-	router.Handle("/_QUERIES/{queriesLocation}/{script}", queryRoute(queryStack, h.Script.Execute))
-	router.Handle("/_QUERIES/{database}/{queriesLocation}/{script}", queryRoute(queryStack, h.Script.Execute))
-
-	if runtime.GOOS != "windows" {
-		router.Handle("/_PLUGIN/{file}/{func}", authRoute(cfg, plg.Handler()))
-	}
-
-	// Studio must be registered before /{database}/{schema} catch-alls.
-	router.PathPrefix("/_studio").Handler(studio.Handler(cfg.StudioConf.Enabled))
-
-	router.Handle("/{database}/{schema}", catalogRoute(catalogStack, h.Catalog.ListTablesByDatabaseAndSchema)).Methods("GET")
-	router.Handle("/show/{database}/{schema}/{table}", catalogRoute(catalogStack, h.Table.Show)).Methods("GET")
 	router.HandleFunc("/_health", h.Health.Handler()).Methods("GET")
-	router.HandleFunc("/_ready", h.Ready.Handler()).Methods("GET")
-
 	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Select)).Methods("GET")
-	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Insert)).Methods("POST")
-	router.Handle("/batch/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.BatchInsert)).Methods("POST")
-	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Delete)).Methods("DELETE")
-	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Update)).Methods("PUT", "PATCH")
 }
 
 // otelRouteTagMiddleware annotates the active OpenTelemetry span with the
@@ -107,35 +76,4 @@ func otelRouteTagMiddleware(next http.Handler) http.Handler {
 
 func crudRoute(stack *middlewares.CRUDStack, handler http.HandlerFunc) http.Handler {
 	return negroni.New(append(stack.Handlers(), negroni.Wrap(handler))...)
-}
-
-func catalogRoute(stack *middlewares.CatalogStack, handler http.HandlerFunc) http.Handler {
-	return negroni.New(append(stack.Handlers(), negroni.Wrap(handler))...)
-}
-
-func queryRoute(stack *middlewares.QueryStack, handler http.HandlerFunc) http.Handler {
-	if stack == nil || len(stack.Handlers()) == 0 {
-		return handler
-	}
-	return negroni.New(append(stack.Handlers(), negroni.Wrap(handler))...)
-}
-
-func adminRoute(stack *middlewares.AdminQueryStack, handler http.HandlerFunc) http.Handler {
-	return negroni.New(append(stack.Handlers(), negroni.Wrap(handler))...)
-}
-
-// authRoute enforces auth.enabled on routes that have no table ACL
-// (/_mcp, /_PLUGIN).
-func authRoute(cfg *config.Prest, handler http.HandlerFunc) http.Handler {
-	if !cfg.AuthEnabled {
-		return handler
-	}
-	return negroni.New(
-		middlewares.AuthMiddleware(middlewares.AuthSettings{
-			Enabled:      cfg.AuthEnabled,
-			JWTKey:       cfg.JWTKey,
-			JWTWhiteList: cfg.JWTWhiteList,
-		}),
-		negroni.Wrap(handler),
-	)
 }
