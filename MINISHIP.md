@@ -161,8 +161,11 @@ you mean the files, and the directory only when the patch owns all of it.
     A fallback, so an operator who names their own keeps it; added where the
     connection is opened rather than in the URI the pool is keyed by, because
     what `rest` calls itself is not part of which `Database` a pooled
-    connection is to. `miniship.yml` reads the live-Postgres line from both
-    of `rest`'s integration packages now, not one.
+    connection is to. Whether a URI already names one is asked of the
+    *setting* — the name starts the URI or follows a delimiter — so a
+    password that happens to spell it is a password, and the connection
+    carrying it still gets a name. `miniship.yml` reads the live-Postgres
+    line from both of `rest`'s integration packages now, not one.
     Paths: `adapters/postgres/application_name.go`,
     `adapters/postgres/internal/connection/conn.go`,
     `adapters/postgres/internal/connection/conn_test.go`,
