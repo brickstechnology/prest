@@ -19,11 +19,7 @@ var (
 
 	// PrestVersionNumber is the fallback version when Version is unset.
 	// It should match the version in go.mod when building from source.
-	//
-	// miniship: the upstream tag this branch sits on, on the miniship line.
-	// MINISHIP.md states the tag and cmd/version_miniship_test.go holds this
-	// to it; upstream's own fallback here was 2.0.0 on a v2.4.2 tree.
-	PrestVersionNumber = "2.4.2+miniship"
+	PrestVersionNumber = "devel"
 	// CommitHash is kept for compatibility; prefer Commit.
 	CommitHash string
 
