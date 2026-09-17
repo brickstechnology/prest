@@ -105,6 +105,7 @@ type Prest struct {
 	PGSSLCert            string
 	PGSSLKey             string
 	PGSSLRootCert        string
+	PGAnonRole           string // miniship: the role a read of PGDatabase becomes, with no default
 	ContextPath          string
 	PGMaxIdleConn        int
 	PGMaxOpenConn        int
@@ -252,9 +253,13 @@ func setServerDefaults(v *viper.Viper) {
 	v.SetDefault("json.agg.type", "jsonb_agg")
 
 	v.SetDefault("cors.allowheaders", []string{"Content-Type"})
-	v.SetDefault("cors.allowmethods", []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"})
+	// miniship: rest serves one verb, to a browser on whatever address an App
+	// has, and carries no credential. So a preflight for a write verb is not
+	// granted, and a response is never shared with a credentialed request.
+	// Upstream allowed POST, PUT and DELETE, with credentials.
+	v.SetDefault("cors.allowmethods", []string{"GET", "HEAD", "OPTIONS"})
 	v.SetDefault("cors.alloworigin", []string{"*"})
-	v.SetDefault("cors.allowcredentials", true)
+	v.SetDefault("cors.allowcredentials", false)
 
 	v.SetDefault("https.mode", false)
 	v.SetDefault("https.cert", "/etc/certs/cert.crt")

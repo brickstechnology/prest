@@ -12,6 +12,7 @@ import (
 	"github.com/prest/prest/v2/internal/logsafe"
 	"github.com/prest/prest/v2/middlewares"
 
+	"github.com/lib/pq"
 	"github.com/structy/log"
 )
 
@@ -23,6 +24,8 @@ type CRUDHandler struct {
 	perms    adapters.PermissionsChecker
 	db       adapters.DatabaseRegistry
 	cache    ResponseCacher
+	roles    adapters.AnonymousRoles
+	reader   adapters.RoleReader
 }
 
 func (h *CRUDHandler) ports(r *http.Request) (builder adapters.RequestQueryBuilder, sql adapters.SQLBuilder, executor adapters.QueryExecutor, perms adapters.PermissionsChecker, db adapters.DatabaseRegistry) {
@@ -39,6 +42,10 @@ func (h *CRUDHandler) bound(r *http.Request) *CRUDHandler {
 	return &cp
 }
 
+// servedSchema is the one schema rest serves (miniship). A Project's own
+// tables are in public; every other schema is refused before any SQL.
+const servedSchema = "public"
+
 // NewCRUDHandler creates a CRUDHandler.
 func NewCRUDHandler(deps Deps) *CRUDHandler {
 	return &CRUDHandler{
@@ -48,10 +55,19 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		perms:    deps.Perms,
 		db:       deps.DB,
 		cache:    deps.Cache,
+		roles:    deps.Roles,
+		reader:   deps.Reader,
 	}
 }
 
 // Select performs a SELECT on a table.
+//
+// miniship: the read runs as the database's anonymous role, inside a
+// read-only transaction that became it, over public alone. A database given
+// with no role, or an adapter that cannot become one, is refused, and the read
+// is never run as the login instead. pREST's own access list is not what
+// protects a row here: rest runs with access.restrict off, so the database's
+// grants and row security decide.
 func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	h = h.bound(r)
 	vars := pathVars(r)
@@ -74,6 +90,20 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 
 	if !validatePathSegments(database, schema, table) {
 		jsonError(w, "invalid identifier in path", http.StatusBadRequest)
+		return
+	}
+
+	// miniship: a schema that is not public is not found, as a database rest
+	// was not given is not found, and no SQL is built for it.
+	if schema != servedSchema {
+		jsonError(w, fmt.Sprintf("schema not served: %v", schema), http.StatusNotFound)
+		return
+	}
+
+	// miniship: the role, before anything is built. There is no default.
+	role, ok := h.anonymousRole(database)
+	if !ok || h.reader == nil {
+		jsonError(w, adapters.ErrNoAnonymousRole.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -192,13 +222,25 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	runQuery := h.executor.QueryCtx
+	runQuery := h.reader.QueryAsRoleCtx
 	if countFirst {
-		runQuery = h.executor.QueryCountCtx
+		runQuery = h.reader.QueryCountAsRoleCtx
 	}
-	sc := runQuery(ctx, sqlSelect, values...)
+	sc := runQuery(ctx, role, sqlSelect, values...)
 	if err = sc.Err(); err != nil {
 		log.Errorln(logsafe.Error(err))
+		// miniship: a role that could not be entered served nothing, and says
+		// only that; the driver's own words stay in the log.
+		if errors.Is(err, adapters.ErrRoleNotEntered) || errors.Is(err, adapters.ErrNoAnonymousRole) {
+			jsonError(w, adapters.ErrRoleNotEntered.Error(), http.StatusInternalServerError)
+			return
+		}
+		// miniship: the database refused the role this read became.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == insufficientPrivilege {
+			jsonError(w, pqErr.Message, http.StatusForbidden)
+			return
+		}
 		writeStatementError(w, err, schema, table, "", "")
 		return
 	}
@@ -208,6 +250,18 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	}
 	//nolint
 	w.Write(sc.Bytes())
+}
+
+// insufficientPrivilege is Postgres's SQLSTATE for a privilege the current
+// role does not hold.
+const insufficientPrivilege = "42501"
+
+// anonymousRole returns the role reads of database become.
+func (h *CRUDHandler) anonymousRole(database string) (string, bool) {
+	if h.roles == nil {
+		return "", false
+	}
+	return h.roles.AnonymousRole(database)
 }
 
 // Insert performs an INSERT on a table.

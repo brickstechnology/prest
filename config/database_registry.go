@@ -35,6 +35,10 @@ type DatabaseConf struct {
 	SSL         DatabaseSSLConf `mapstructure:"ssl"`
 	MaxOpenConn int             `mapstructure:"maxopenconn"`
 	MaxIdleConn int             `mapstructure:"maxidleconn"`
+	// AnonRole is the role a read of this database becomes (miniship). It
+	// has no default and is not filled from pg.anon_role: an entry that does
+	// not name its own role is not served.
+	AnonRole string `mapstructure:"anon_role"`
 }
 
 // HasDatabaseRegistry reports whether a multi-database registry is configured.
@@ -147,7 +151,14 @@ func parseDatabaseRegistryFromEnv() []DatabaseConf {
 			slog.Warn("database registry entry skipped: invalid alias", "alias", alias, "index", i)
 			continue
 		}
-		conf := DatabaseConf{Alias: alias, URL: connURL}
+		conf := DatabaseConf{
+			Alias: alias,
+			URL:   connURL,
+			AnonRole: envFirst(
+				fmt.Sprintf("DATABASE_ANON_ROLE_%d", i),
+				fmt.Sprintf("PREST_DATABASE_ANON_ROLE_%d", i),
+			),
+		}
 		applyURLToDatabaseConf(&conf)
 		dbs = append(dbs, conf)
 	}
@@ -371,4 +382,27 @@ func (p *Prest) ProfileByAlias(alias string) (DatabaseConf, bool) {
 		}
 	}
 	return DatabaseConf{}, false
+}
+
+// AnonymousRole returns the role a read of alias becomes: the registry entry's
+// anon_role, or, with no registry, pg.anon_role for the one configured
+// database. ok is false for a name rest was not given and for a database given
+// with no role, which is then not served.
+//
+// miniship: upstream reads every database as the login it connects with.
+func (p *Prest) AnonymousRole(alias string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	if p.HasDatabaseRegistry() {
+		conf, ok := p.ProfileByAlias(alias)
+		if !ok || conf.AnonRole == "" {
+			return "", false
+		}
+		return conf.AnonRole, true
+	}
+	if alias == "" || alias != p.PGDatabase || p.PGAnonRole == "" {
+		return "", false
+	}
+	return p.PGAnonRole, true
 }

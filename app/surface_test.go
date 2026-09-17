@@ -129,6 +129,7 @@ func restConf(db *countingDatabase) *config.Prest {
 		PGUser:        "authenticator",
 		PGPass:        "not-a-real-password",
 		PGDatabase:    "given",
+		PGAnonRole:    "app_anon",
 		PGSSLMode:     "disable",
 		PGConnTimeout: 2,
 		PGMaxOpenConn: 1,
@@ -219,6 +220,7 @@ func TestTableRead_withARegistry_refusesADatabaseItWasNotGiven(t *testing.T) {
 		User:     "authenticator",
 		Database: "tenant_a",
 		SSL:      config.DatabaseSSLConf{Mode: "disable"},
+		AnonRole: "app_anon",
 	}}
 	cfg.Adapter = postgres.New(cfg)
 	plg := plugins.New(cfg)
@@ -239,4 +241,54 @@ func TestTableRead_withARegistry_refusesADatabaseItWasNotGiven(t *testing.T) {
 
 	serve(rest, "GET /tenant-a/public/posts")
 	db.requireAConnection(t)
+}
+
+// miniship: a database rest was given with no anonymous role is not served,
+// and no connection is opened for it, in either shape.
+func TestTableRead_refusesADatabaseGivenNoRole(t *testing.T) {
+	db := newCountingDatabase(t)
+	cfg := restConf(db)
+	cfg.PGAnonRole = ""
+	cfg.Adapter = postgres.New(cfg)
+	a, err := app.New(cfg)
+	require.NoError(t, err)
+
+	rec := serve(a.Handler, "GET /given/public/posts")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "no anonymous role")
+	db.requireNoConnection(t)
+
+	registry := restConf(db)
+	registry.Databases = []config.DatabaseConf{{
+		Alias:    "tenant-a",
+		Host:     "127.0.0.1",
+		Port:     db.port,
+		User:     "authenticator",
+		Database: "tenant_a",
+		SSL:      config.DatabaseSSLConf{Mode: "disable"},
+	}}
+	registry.Adapter = postgres.New(registry)
+	plg := plugins.New(registry)
+	r := mux.NewRouter().StrictSlash(true)
+	router.RegisterRoutes(r, registry, controllers.NewHandlersFromConfig(registry),
+		middlewares.NewCRUDStack(registry, plg), nil, nil, plg)
+	rest := middlewares.New(registry)
+	rest.UseHandler(r)
+
+	rec = serve(rest, "GET /tenant-a/public/posts")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	db.requireNoConnection(t)
+}
+
+// miniship: a schema other than public is not served, and no connection is
+// opened for it.
+func TestTableRead_refusesASchemaOtherThanPublic(t *testing.T) {
+	db := newCountingDatabase(t)
+	rest := newRest(t, db)
+
+	for _, schema := range []string{"private", "pg_catalog", "information_schema"} {
+		rec := serve(rest, "GET /given/"+schema+"/posts")
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", schema, rec.Body)
+	}
+	db.requireNoConnection(t)
 }

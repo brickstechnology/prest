@@ -60,6 +60,8 @@ func parseDBConfig(v *viper.Viper, cfg *Prest) error {
 	cfg.PGSSLKey = configuredString(v, "pg.ssl.key")
 	cfg.PGSSLCert = configuredString(v, "pg.ssl.cert")
 	cfg.PGSSLRootCert = configuredString(v, "pg.ssl.rootcert")
+	// miniship: the role a read of PGDatabase becomes, with no default.
+	cfg.PGAnonRole = configuredString(v, "pg.anon_role")
 
 	if os.Getenv("DATABASE_URL") != "" {
 		// cloud factor support: https://devcenter.heroku.com/changelog-items/438
