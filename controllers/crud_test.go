@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -58,6 +59,8 @@ func TestCRUDHandler_Select_PermissionDenied(t *testing.T) {
 	db := mockDatabaseRegistry(ctrl)
 
 	h := NewCRUDHandler(Deps{
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(nil),
 		Perms:    perms,
 		DB:       db,
 		Builder:  mockgen.NewMockRequestQueryBuilder(ctrl),
@@ -84,6 +87,8 @@ func TestCRUDHandler_Select_InvalidPath(t *testing.T) {
 	db := mockDatabaseRegistry(ctrl)
 
 	h := NewCRUDHandler(Deps{
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(nil),
 		DB:       db,
 		Builder:  mockgen.NewMockRequestQueryBuilder(ctrl),
 		SQL:      mockgen.NewMockSQLBuilder(ctrl),
@@ -134,6 +139,8 @@ func TestCRUDHandler_Select_Success(t *testing.T) {
 	db := mockDatabaseRegistry(ctrl)
 
 	h := NewCRUDHandler(Deps{
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(executor),
 		Perms:    perms,
 		SQL:      sqlBuilder,
 		Builder:  builder,
@@ -173,6 +180,8 @@ func TestCRUDHandler_Select_TimeBucketClauseError(t *testing.T) {
 	builder.EXPECT().TimeBucketClause(gomock.Any()).Return("", errors.New("invalid time_bucket interval"))
 
 	h := NewCRUDHandler(Deps{
+		Roles:   upstreamTestRoles,
+		Reader:  readerOver(nil),
 		Perms:   perms,
 		SQL:     sqlBuilder,
 		Builder: builder,
@@ -227,6 +236,8 @@ func TestCRUDHandler_Select_TimeBucketClauseSuccess(t *testing.T) {
 	)
 
 	h := NewCRUDHandler(Deps{
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(executor),
 		Perms:    perms,
 		SQL:      sqlBuilder,
 		Builder:  builder,
@@ -276,7 +287,7 @@ func TestCRUDHandler_Select_WithClauses(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/test?name=$eq.prest", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
@@ -320,7 +331,7 @@ func TestCRUDHandler_Select_CountFirst(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/test?_count=*&_count_first=true", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
@@ -365,7 +376,9 @@ func TestCRUDHandler_Select_WithCache(t *testing.T) {
 
 	cacher := &recordingCacher{}
 	h := NewCRUDHandler(Deps{
-		Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db, Cache: cacher,
+		Roles:  upstreamTestRoles,
+		Reader: readerOver(executor),
+		Perms:  perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db, Cache: cacher,
 	})
 
 	url := "/prest-test/public/test?foo=bar"
@@ -411,7 +424,7 @@ func TestCRUDHandler_Select_RelationNotFound(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/missing", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "missing",
 	})
@@ -453,7 +466,7 @@ func TestCRUDHandler_Select_WithUserContext(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
@@ -770,7 +783,7 @@ func TestCRUDHandler_Select_UnregisteredDB(t *testing.T) {
 	db := mockgen.NewMockDatabaseRegistry(ctrl)
 	db.EXPECT().IsRegistered("invalid").Return(false)
 
-	h := NewCRUDHandler(Deps{DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(nil), DB: db})
 
 	req := crudRequest(http.MethodGet, "/invalid/public/test", map[string]string{
 		"database": "invalid", "schema": "public", "table": "test",
@@ -792,8 +805,10 @@ func TestCRUDHandler_Select_PermissionErrorOnFields(t *testing.T) {
 	perms.EXPECT().FieldsPermissions(gomock.Any(), "prest-test", "public", "test", "read", "").Return(nil, errors.New("permission denied"))
 
 	h := NewCRUDHandler(Deps{
-		Perms: perms,
-		DB:    mockDatabaseRegistry(ctrl),
+		Roles:  upstreamTestRoles,
+		Reader: readerOver(nil),
+		Perms:  perms,
+		DB:     mockDatabaseRegistry(ctrl),
 	})
 
 	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
@@ -815,8 +830,10 @@ func TestCRUDHandler_Select_NoPermittedFields(t *testing.T) {
 	perms.EXPECT().FieldsPermissions(gomock.Any(), "prest-test", "public", "test", "read", "").Return([]string{}, nil)
 
 	h := NewCRUDHandler(Deps{
-		Perms: perms,
-		DB:    mockDatabaseRegistry(ctrl),
+		Roles:  upstreamTestRoles,
+		Reader: readerOver(nil),
+		Perms:  perms,
+		DB:     mockDatabaseRegistry(ctrl),
 	})
 
 	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
@@ -968,9 +985,11 @@ func TestCRUDHandler_Select_SelectFieldsError(t *testing.T) {
 	sqlBuilder.EXPECT().SelectFields([]string{"name"}).Return("", errors.New("invalid column"))
 
 	h := NewCRUDHandler(Deps{
-		Perms: perms,
-		SQL:   sqlBuilder,
-		DB:    mockDatabaseRegistry(ctrl),
+		Roles:  upstreamTestRoles,
+		Reader: readerOver(nil),
+		Perms:  perms,
+		SQL:    sqlBuilder,
+		DB:     mockDatabaseRegistry(ctrl),
 	})
 
 	rec := runSelect(t, h, http.MethodGet)
@@ -987,7 +1006,7 @@ func TestCRUDHandler_Select_DistinctClauseError(t *testing.T) {
 	perms, sqlBuilder, builder, executor, db := baseSelectMocks(ctrl)
 	builder.EXPECT().DistinctClause(gomock.Any()).Return("", errors.New("bad distinct"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1004,7 +1023,7 @@ func TestCRUDHandler_Select_CountByRequestError(t *testing.T) {
 	builder.EXPECT().DistinctClause(gomock.Any()).Return("", nil)
 	builder.EXPECT().CountByRequest(gomock.Any()).Return("", errors.New("bad count"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1022,7 +1041,7 @@ func TestCRUDHandler_Select_JoinByRequestError(t *testing.T) {
 	builder.EXPECT().CountByRequest(gomock.Any()).Return("", nil)
 	builder.EXPECT().JoinByRequest(gomock.Any()).Return(nil, errors.New("bad join"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1041,7 +1060,7 @@ func TestCRUDHandler_Select_WhereByRequestError(t *testing.T) {
 	builder.EXPECT().JoinByRequest(gomock.Any()).Return(nil, nil)
 	builder.EXPECT().WhereByRequest(gomock.Any(), 1).Return("", nil, errors.New("bad where"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1063,7 +1082,7 @@ func TestCRUDHandler_Select_OrderByRequestError(t *testing.T) {
 	builder.EXPECT().TimeBucketClause(gomock.Any()).Return("", nil)
 	builder.EXPECT().OrderByRequest(gomock.Any()).Return("", errors.New("bad order"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1086,7 +1105,7 @@ func TestCRUDHandler_Select_PaginateError(t *testing.T) {
 	builder.EXPECT().OrderByRequest(gomock.Any()).Return("", nil)
 	builder.EXPECT().PaginateIfPossible(gomock.Any()).Return("", errors.New("bad page"))
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1106,7 +1125,7 @@ func TestCRUDHandler_Select_ExecutorError(t *testing.T) {
 	scanner.EXPECT().Err().Return(errors.New("query failed"))
 	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1129,7 +1148,9 @@ func TestCRUDHandler_Select_NoCacheOnHead(t *testing.T) {
 
 	cacher := &recordingCacher{}
 	h := NewCRUDHandler(Deps{
-		Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db, Cache: cacher,
+		Roles:  upstreamTestRoles,
+		Reader: readerOver(executor),
+		Perms:  perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db, Cache: cacher,
 	})
 	rec := runSelect(t, h, http.MethodHead)
 
@@ -1144,7 +1165,7 @@ func TestCRUDHandler_Select_SingleDBMismatch(t *testing.T) {
 	defer ctrl.Finish()
 
 	db := mockDatabaseRegistry(ctrl)
-	h := NewCRUDHandler(Deps{DB: db, SingleDB: true})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(nil), DB: db, SingleDB: true})
 
 	req := crudRequest(http.MethodGet, "/other/public/test", map[string]string{
 		"database": "other", "schema": "public", "table": "test",
@@ -1171,7 +1192,7 @@ func TestCRUDHandler_Select_NonUserContextIgnored(t *testing.T) {
 	scanner.EXPECT().Bytes().Return([]byte(`[]`))
 	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "test",
 	})
@@ -1654,4 +1675,31 @@ func TestNewCRUDHandler(t *testing.T) {
 	h := NewCRUDHandler(deps)
 	require.NotNil(t, h)
 	require.True(t, h.singleDB)
+}
+
+// miniship: the table read runs as a role, so upstream's Select tests are
+// given one, and a reader that forwards to the executor mock each test already
+// sets up. Reads arrive at that mock only as app_anon.
+var upstreamTestRoles = staticRoles{"prest-test": "app_anon"}
+
+type executorAsReader struct {
+	executor adapters.QueryExecutor
+}
+
+func readerOver(executor adapters.QueryExecutor) adapters.RoleReader {
+	return executorAsReader{executor: executor}
+}
+
+func (e executorAsReader) QueryAsRoleCtx(ctx context.Context, role, SQL string, params ...interface{}) adapters.Scanner {
+	if role != "app_anon" {
+		return answering("", fmt.Errorf("read asked as %q", role))
+	}
+	return e.executor.QueryCtx(ctx, SQL, params...)
+}
+
+func (e executorAsReader) QueryCountAsRoleCtx(ctx context.Context, role, SQL string, params ...interface{}) adapters.Scanner {
+	if role != "app_anon" {
+		return answering("", fmt.Errorf("count asked as %q", role))
+	}
+	return e.executor.QueryCountCtx(ctx, SQL, params...)
 }
