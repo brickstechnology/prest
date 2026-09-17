@@ -159,7 +159,7 @@ const ApplicationName = "rest"
 // pool is keyed by: what rest calls itself is not part of which Database a
 // pooled connection is to.
 func WithApplicationName(uri string) string {
-	if uri == "" || strings.Contains(uri, "application_name") {
+	if uri == "" || namesApplication(uri) {
 		return uri
 	}
 	if strings.HasPrefix(uri, "postgres://") || strings.HasPrefix(uri, "postgresql://") {
@@ -170,6 +170,29 @@ func WithApplicationName(uri string) string {
 		return uri + separator + "fallback_application_name=" + ApplicationName
 	}
 	return uri + " fallback_application_name=" + ApplicationName
+}
+
+// namesApplication reports whether uri already carries either spelling of the
+// setting, as a setting rather than as part of some value: a password of
+// "application_name" is a password, and a connection carrying one still has no
+// name of its own.
+func namesApplication(uri string) bool {
+	for rest := uri; ; {
+		at := strings.Index(rest, "application_name=")
+		if at < 0 {
+			return false
+		}
+		before := rest[:at]
+		// fallback_application_name= is the other spelling of the same setting.
+		before = strings.TrimSuffix(before, "fallback_")
+		// A setting starts the URI or follows a delimiter: a space in a keyword
+		// DSN, and ? or & in a URL's query.
+		if before == "" || strings.HasSuffix(before, " ") ||
+			strings.HasSuffix(before, "?") || strings.HasSuffix(before, "&") {
+			return true
+		}
+		rest = rest[at+len("application_name="):]
+	}
 }
 
 // BuildURI builds a postgres connection URI from a database profile.

@@ -58,6 +58,33 @@ func TestWithApplicationName(t *testing.T) {
 			uri:  "",
 			want: "",
 		},
+		{
+			// A password is a value, not a setting, so a connection carrying
+			// this one still has no name of its own.
+			desc: "a password that happens to spell the setting is not one",
+			uri:  "user=authenticator dbname=tenant_a password=application_name=x",
+			want: "user=authenticator dbname=tenant_a password=application_name=x fallback_application_name=rest",
+		},
+		{
+			desc: "and neither is one inside a URL's password",
+			uri:  "postgres://authenticator:application_name=x@db-a:5432/tenant_a",
+			want: "postgres://authenticator:application_name=x@db-a:5432/tenant_a?fallback_application_name=rest",
+		},
+		{
+			desc: "a setting first in the query is still a setting",
+			uri:  "postgres://authenticator@db-a:5432/tenant_a?application_name=theirs&sslmode=disable",
+			want: "postgres://authenticator@db-a:5432/tenant_a?application_name=theirs&sslmode=disable",
+		},
+		{
+			desc: "and so is one after another",
+			uri:  "postgres://authenticator@db-a:5432/tenant_a?sslmode=disable&application_name=theirs",
+			want: "postgres://authenticator@db-a:5432/tenant_a?sslmode=disable&application_name=theirs",
+		},
+		{
+			desc: "a keyword DSN that opens with the setting",
+			uri:  "application_name=theirs user=authenticator dbname=tenant_a",
+			want: "application_name=theirs user=authenticator dbname=tenant_a",
+		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
