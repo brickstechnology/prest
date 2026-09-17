@@ -11,7 +11,6 @@ import (
 
 	"github.com/prest/prest/v2/adapters"
 	"github.com/prest/prest/v2/adapters/postgres"
-	"github.com/prest/prest/v2/adapters/timescaledb"
 	"github.com/prest/prest/v2/config"
 	pctx "github.com/prest/prest/v2/context"
 	"github.com/prest/prest/v2/controllers"
@@ -34,33 +33,45 @@ type App struct {
 
 // New builds a ready-to-serve App from cfg.
 //
-// Creates and registers adapters for each configured database. If cfg.Adapter is nil
-// and no database registry is configured, detects and creates a default adapter.
+// Creates and registers an adapter for each configured database. If cfg.Adapter
+// is nil and no database registry is configured, a default adapter is created.
 // Handlers, CRUD middleware, routes, global middleware, and plugins are wired into
 // a single http.Handler.
 //
-// Returns an error when the database connection cannot be established.
+// miniship: composing rest opens no connection to any Database
+// (miniship-cloud#547). Upstream connected to and pinged every registry entry
+// here, and probed TimescaleDB when there was no registry; at 250 Projects that
+// woke 250 computes against a ceiling of 20 concurrently active, before a
+// caller had asked for anything. Each adapter is created unconnected and its
+// pool fills on the first call that names its Database, which is the property
+// ADR 0017 rests on: a Project nobody calls costs nothing.
 func New(cfg *config.Prest) (*App, error) {
 	registry := adapters.NewRegistry()
 
-	// Multi-database mode: create adapter for each configured database
+	// Multi-database mode: create an adapter for each configured database
 	if cfg.HasDatabaseRegistry() {
+		// The default adapter below is this one, taken in the order the
+		// registry is configured in rather than from a map, so which Database
+		// answers a question asked of no Database in particular does not
+		// change between two runs of the same binary.
+		var first adapters.Adapter
 		for _, dbConf := range cfg.Databases {
-			adapter, err := createAdapterForDatabase(cfg, &dbConf)
-			if err != nil {
-				return nil, err
-			}
+			adapter := createAdapterForDatabase(cfg, &dbConf)
 			if err := registry.Register(dbConf.Alias, adapter); err != nil {
 				return nil, err
 			}
+			if first == nil {
+				first = adapter
+			}
 			slog.Info("registered adapter for database", "alias", dbConf.Alias)
 		}
-	} else if cfg.Adapter == nil {
-		// Single database mode (backward compatibility): detect and create default adapter
-		adapter, err := detectAndCreateAdapter(cfg)
-		if err != nil {
-			return nil, err
+		if cfg.Adapter == nil {
+			cfg.Adapter = first
 		}
+	} else if cfg.Adapter == nil {
+		// Single database mode (backward compatibility): create the default adapter
+		adapter := postgres.New(cfg)
+		setCurrentDatabase(adapter, cfg.PGDatabase)
 		cfg.Adapter = adapter
 		alias := cfg.PGDatabase
 		if alias == "" {
@@ -88,14 +99,6 @@ func New(cfg *config.Prest) (*App, error) {
 		return nil, err
 	}
 
-	// For multi-database mode, set a default adapter for health checks and schema operations
-	// Use the first registered adapter if no primary adapter is configured
-	if cfg.Adapter == nil && len(registry.GetAll()) > 0 {
-		aliases := registry.GetAll()
-		defaultAdapter, _ := registry.Get(aliases[0])
-		cfg.Adapter = defaultAdapter
-	}
-
 	deps := controllers.NewDepsFromConfig(cfg)
 	deps.AdapterRegistry = registry // Inject registry into deps
 	h := controllers.NewHandlers(deps, cfg)
@@ -111,12 +114,15 @@ func New(cfg *config.Prest) (*App, error) {
 	mux := mux.NewRouter().StrictSlash(true)
 	router.RegisterRoutes(mux, cfg, h, crud, queryStack, adminStack, plg)
 
-	// Add adapter selector middleware for multi-database routing
-	// This attaches the correct adapter to each request based on the database name in the URL
-	muxWithAdapter := middlewares.NewAdapterSelectorMiddleware(registry, mux)
-
+	// miniship: the adapter is chosen inside the handler, from the matched
+	// route (miniship-cloud#547). Upstream wrapped the router in
+	// NewAdapterSelectorMiddleware here, outside it, where mux has not matched
+	// yet and mux.Vars is empty — so the middleware never saw {database} and
+	// every read ran on whichever adapter came back first. The middleware is
+	// left in the tree, unused, as the removed routes' handlers are, so an
+	// upstream rebase does not conflict on it.
 	n := middlewares.New(cfg)
-	n.UseHandler(muxWithAdapter)
+	n.UseHandler(mux)
 
 	var handler http.Handler = n
 	if cfg.Otel.Enabled {
@@ -219,30 +225,23 @@ func PostgresDB(cfg *config.Prest) (*sqlx.DB, error) {
 	return db, nil
 }
 
-// detectAndCreateAdapter tries to connect to TimescaleDB first; if not available, falls back to PostgreSQL.
-// This allows pREST to auto-detect and use the appropriate adapter without configuration.
-func detectAndCreateAdapter(cfg *config.Prest) (adapters.Adapter, error) {
-	// Try TimescaleDB first
-	tsAdapter := timescaledb.New(cfg)
-	if err := timescaledb.Connect(tsAdapter); err == nil {
-		slog.Info("detected TimescaleDB; using timescaledb adapter")
-		return tsAdapter, nil
-	}
-	// Fallback to PostgreSQL
-	pgAdapter := postgres.New(cfg)
-	if err := postgres.Connect(pgAdapter); err != nil {
-		return nil, err
-	}
-	slog.Info("using postgres adapter")
-	return pgAdapter, nil
-}
-
-// createAdapterForDatabase creates and connects an adapter for a specific database configuration.
-// Currently all databases use the postgres adapter (wire-compatible mode).
-// In the future, this can route to TimescaleDB, MySQL, or other adapters based on detection.
-func createAdapterForDatabase(cfg *config.Prest, dbConf *config.DatabaseConf) (adapters.Adapter, error) {
+// createAdapterForDatabase creates an unconnected adapter for one registry
+// entry. Every database uses the postgres adapter.
+//
+// miniship: two things went from here (miniship-cloud#547). The adapter is no
+// longer connected, so composing rest touches no Database; and TimescaleDB is
+// no longer detected, because detecting it *is* a connection — one to every
+// entry, at start-up, before the fallback opens a second. rest serves a
+// Project's public schema over one grammar, and the timescaledb adapter
+// remains in the tree for an upstream rebase.
+//
+// The entry's own registry is what the adapter is given: this adapter holds
+// this Database and can resolve no other, so a read that reached the wrong
+// adapter is refused rather than quietly answered from the right connection.
+func createAdapterForDatabase(cfg *config.Prest, dbConf *config.DatabaseConf) adapters.Adapter {
 	// Create a temporary config scoped to this database for adapter creation
 	dbCfg := *cfg
+	dbCfg.Databases = []config.DatabaseConf{*dbConf}
 	dbCfg.PGHost = dbConf.Host
 	dbCfg.PGPort = dbConf.Port
 	dbCfg.PGUser = dbConf.User
@@ -258,18 +257,20 @@ func createAdapterForDatabase(cfg *config.Prest, dbConf *config.DatabaseConf) (a
 		dbCfg.PGURL = dbConf.URL
 	}
 
-	// Try TimescaleDB first, fall back to PostgreSQL
-	tsAdapter := timescaledb.New(&dbCfg)
-	if err := timescaledb.Connect(tsAdapter); err == nil {
-		slog.Info("detected TimescaleDB for database", "alias", dbConf.Alias)
-		return tsAdapter, nil
-	}
-
-	// Fallback to PostgreSQL
-	pgAdapter := postgres.New(&dbCfg)
-	if err := postgres.Connect(pgAdapter); err != nil {
-		return nil, fmt.Errorf("failed to connect to database %s: %w", dbConf.Alias, err)
-	}
+	adapter := postgres.New(&dbCfg)
+	setCurrentDatabase(adapter, dbConf.Database)
 	slog.Info("using postgres adapter for database", "alias", dbConf.Alias)
-	return pgAdapter, nil
+	return adapter
+}
+
+// setCurrentDatabase names the database an adapter answers for when a caller
+// names none.
+//
+// miniship: upstream set it as a side effect of connecting at start-up. rest
+// does not connect at start-up, so it is set here, and the pool still fills on
+// the first call that needs it.
+func setCurrentDatabase(adapter adapters.Adapter, name string) {
+	if registry, ok := adapter.(adapters.DatabaseRegistry); ok {
+		registry.SetDatabase(name)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/prest/prest/v2/config"
@@ -140,6 +141,35 @@ func (m *Manager) uriFor(name string) (string, bool) {
 		dbURI += " sslrootcert=" + m.cfg.PGSSLRootCert
 	}
 	return dbURI, true
+}
+
+// ApplicationName is what rest's connections call themselves, so that a
+// Database can tell which of the sessions in its pg_stat_activity are rest's
+// and which belong to something else (miniship-cloud#547).
+const ApplicationName = "rest"
+
+// WithApplicationName is uri with ApplicationName as the name the connection
+// reports, unless the URI already names one.
+//
+// miniship: it is given as lib/pq's fallback_application_name, which the
+// driver uses only when nothing else supplied application_name — so an
+// operator who names their own, in the URL or in PGAPPNAME, keeps it.
+//
+// The name is added where the connection is opened rather than in the URI the
+// pool is keyed by: what rest calls itself is not part of which Database a
+// pooled connection is to.
+func WithApplicationName(uri string) string {
+	if uri == "" || strings.Contains(uri, "application_name") {
+		return uri
+	}
+	if strings.HasPrefix(uri, "postgres://") || strings.HasPrefix(uri, "postgresql://") {
+		separator := "?"
+		if strings.Contains(uri, "?") {
+			separator = "&"
+		}
+		return uri + separator + "fallback_application_name=" + ApplicationName
+	}
+	return uri + " fallback_application_name=" + ApplicationName
 }
 
 // BuildURI builds a postgres connection URI from a database profile.
@@ -285,7 +315,7 @@ func (m *Manager) AddDatabaseToPool(name string) (*sqlx.DB, error) {
 			return DB, nil
 		}
 
-		DB, err := dbConnect(m.driverName, uri)
+		DB, err := dbConnect(m.driverName, WithApplicationName(uri))
 		if err != nil {
 			return nil, err
 		}

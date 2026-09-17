@@ -178,7 +178,9 @@ func TestAddDatabaseToPool_singleflightDedup(t *testing.T) {
 	wg.Wait()
 
 	require.Equal(t, "postgres", capturedDriver)
-	require.Equal(t, uri, capturedDSN)
+	// miniship: the pool is keyed by uri, and the driver is handed that uri
+	// with rest's name on it (miniship-cloud#547).
+	require.Equal(t, WithApplicationName(uri), capturedDSN)
 	require.Equal(t, int32(1), connectCalls)
 	for i := range workers {
 		require.NoError(t, errs[i])
