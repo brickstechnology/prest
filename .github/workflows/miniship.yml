@@ -8,7 +8,9 @@ name: miniship
 
 on:
   push:
-    branches: [miniship]
+    # rebase/<tag> is where MINISHIP.md's procedure replays the patches onto a
+    # new upstream tag, and its suite runs before it is merged.
+    branches: [miniship, "rebase/**"]
   pull_request:
     branches: [miniship]
 
@@ -36,9 +38,12 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
+      # The whole history and its tags: miniship/record_test.go compares this
+      # branch with the upstream tag MINISHIP.md names.
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
