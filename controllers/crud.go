@@ -60,8 +60,10 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	table := vars["table"]
 	queries := r.URL.Query()
 
+	// miniship: a database rest was not given is not found, as a route rest
+	// does not have is not found. Upstream answers 400.
 	if err := validateDatabase(database, h.db); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 

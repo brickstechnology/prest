@@ -35,6 +35,16 @@ func testAdapter(cfg ...*config.Prest) *postgres {
 	return New(c).(*postgres)
 }
 
+// contextTestConf is defaultTestConf with contextMockDB in a registry, so a
+// request context can name it. miniship: the adapter refuses a database it was
+// not given, where upstream tried any name on the default host, so the tests
+// that address a second database register it.
+func contextTestConf() *config.Prest {
+	cfg := defaultTestConf()
+	cfg.Databases = []config.DatabaseConf{{Alias: contextMockDB, Database: contextMockDB}}
+	return cfg
+}
+
 func defaultTestConf() *config.Prest {
 	return &config.Prest{
 		PGDatabase:  defaultMockDB,
@@ -55,7 +65,7 @@ func withFailingDBConnect(t *testing.T, msg string) *postgres {
 		return nil, errors.New(msg)
 	})
 	t.Cleanup(restore)
-	return New(defaultTestConf()).(*postgres)
+	return New(contextTestConf()).(*postgres)
 }
 
 func withSQLMock(t *testing.T) (*postgres, sqlmock.Sqlmock) {
@@ -87,7 +97,7 @@ func withSQLMocks(t *testing.T) (*postgres, sqlmock.Sqlmock, sqlmock.Sqlmock) {
 		_ = ctxDB.Close()
 	})
 
-	cfg := defaultTestConf()
+	cfg := contextTestConf()
 	pg := New(cfg).(*postgres)
 	pg.conn.SetDatabase(defaultMockDB)
 	pg.conn.InjectDBForTest(pg.conn.GetURI(defaultMockDB), sqlx.NewDb(defaultDB, "sqlmock"))
@@ -3739,7 +3749,7 @@ func TestDelete_ReturningByteColumn(t *testing.T) {
 
 func TestDbFromCtx_AddDatabaseToPoolFailure(t *testing.T) {
 	adapter := withFailingDBConnect(t, "pool add failed")
-	ctx := context.WithValue(context.Background(), pctx.DBNameKey, "missing-db")
+	ctx := context.WithValue(context.Background(), pctx.DBNameKey, contextMockDB)
 
 	sc := adapter.QueryCtx(ctx, "SELECT 1")
 	require.Error(t, sc.Err())
@@ -4259,4 +4269,14 @@ func TestFieldsPermissionsRejectsReservedTables(t *testing.T) {
 			})
 		}
 	}
+}
+
+// miniship: a database the adapter was not given is refused before any
+// connection is attempted.
+func TestDbFromCtx_refusesADatabaseItWasNotGiven(t *testing.T) {
+	adapter := withFailingDBConnect(t, "a connection was attempted")
+	ctx := context.WithValue(context.Background(), pctx.DBNameKey, "missing-db")
+
+	sc := adapter.QueryCtx(ctx, "SELECT 1")
+	require.ErrorIs(t, sc.Err(), connection.ErrDatabaseNotGiven)
 }

@@ -929,7 +929,8 @@ func TestCRUDHandler_Select_UnregisteredDB(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.Select(rec, req)
 
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	// miniship: not found, where upstream answered 400.
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // Without [[databases]], a name outside pg.database and
