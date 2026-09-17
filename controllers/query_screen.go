@@ -32,27 +32,46 @@ type QueryBounds struct {
 	// capped to it, not refused, and a read that asks for no page at all is
 	// given this one — so no read is unbounded.
 	MaxPageSize int
+	// MaxQueryLen is the largest query string rest will read, in bytes. It
+	// bounds the work done before the page ceiling and the time limit can
+	// bound anything: a query string is as long as the request line allows,
+	// and every filter in it is a predicate built and a parameter bound.
+	MaxQueryLen int
 }
 
-// defaultMaxPageSize is Loki's max_entries_limit_per_query, the one
-// rows-returned limit in docs/research/QUERY-BOUNDS-AND-FAIRNESS.md that ships
-// with a real, non-zero default. See docs/miniship/query-string.md.
-const defaultMaxPageSize = 5000
+// The defaults, both taken from docs/research/QUERY-BOUNDS-AND-FAIRNESS.md and
+// both named in docs/miniship/query-string.md: Loki's
+// max_entries_limit_per_query, the one rows-returned limit in that survey that
+// ships with a real non-zero default, and VictoriaLogs' -search.maxQueryLen,
+// the one query-complexity bound in it expressed as a hard byte cap.
+const (
+	defaultMaxPageSize = 5000
+	defaultMaxQueryLen = 16384
+)
 
 // withDefaults returns b with every unset bound at its default.
 func (b QueryBounds) withDefaults() QueryBounds {
 	if b.MaxPageSize <= 0 {
 		b.MaxPageSize = defaultMaxPageSize
 	}
+	if b.MaxQueryLen <= 0 {
+		b.MaxQueryLen = defaultMaxQueryLen
+	}
 	return b
 }
 
+// queryTooLong is the one refusal that is not ErrQueryNotAccepted: the query
+// string was not read at all, so there is no parameter to name. It answers 414,
+// which is what a request line too long to serve is.
+const queryTooLong = "the query string is longer than rest reads"
+
 // ErrQueryNotAccepted is every refusal this file makes: the request is not one
-// rest serves, and nothing was read. Its message names the parameter and the
-// rule, and never the value, so an error answer cannot be used to echo bytes.
+// rest serves, and nothing was read. Its message names the rule and quotes
+// nothing of the request — not the value, and not the parameter's name either —
+// so an error answer cannot be used to reflect a caller's bytes.
 var ErrQueryNotAccepted = errors.New("query string not accepted")
 
-// refuse builds a refusal that names the parameter and the rule.
+// refuse builds a refusal that states the rule and quotes nothing.
 func refuse(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrQueryNotAccepted, fmt.Sprintf(format, args...))
 }
@@ -65,11 +84,22 @@ var (
 	// digitsRe is a page number or a page size, short enough that no value
 	// here can overflow the int it is parsed into.
 	digitsRe = regexp.MustCompile(`^[0-9]{1,9}$`)
-	// operatorRe is upstream's own operator shape, `$op.`. Upstream finds it
-	// anywhere in a value and strips every occurrence; the screen requires it
-	// at the front, so a value that merely contains one is refused rather than
-	// silently rewritten into a filter the caller did not ask for.
-	operatorRe = regexp.MustCompile(`\$[a-z]+\.`)
+	// operatorRe is upstream's own operator shape, character for character —
+	// `adapters/postgres/postgres.go`'s removeOperatorRegex, whose last `.` is
+	// **not** escaped and so matches any byte, not only a dot. Writing the
+	// dot here instead would leave a hole rather than close one: upstream
+	// reads `$ltreematch x` as the ltree match operator, and a screen looking
+	// for `$ltreematch.` would see no operator at all and wave the value
+	// through.
+	//
+	// Upstream finds this anywhere in a value and strips every occurrence. The
+	// screen requires exactly one, at the front, so a value that merely
+	// contains another is refused rather than silently rewritten into a filter
+	// the caller did not ask for.
+	operatorRe = regexp.MustCompile(`\$[a-z]+.`)
+	// operatorName undoes what upstream does to a match before it looks the
+	// operator up: the dot here, the `$` and the spaces in GetQueryOperator.
+	operatorName = strings.NewReplacer(".", "", "$", "", " ", "")
 )
 
 // aggregates are the six aggregate functions upstream's `FUNC:field[:alias]`
@@ -80,7 +110,7 @@ var aggregates = map[string]struct{}{
 
 // filterOperators are the comparisons a column filter may name. It is this
 // file's own list, deliberately not adapters/postgres's: an operator upstream
-// adds is refused here until it is reviewed. TestScreenOperators_areUpstreams
+// adds is refused here until it is reviewed. TestScreenOperators_areASubsetOfUpstreams
 // holds it to being a subset of upstream's, so a kept operator always resolves.
 //
 // Upstream's four ltree operators (`$ltreelanc`, `$ltreerdesc`, `$ltreematch`,
@@ -114,9 +144,7 @@ func screenTableRead(in url.Values, bounds QueryBounds) (url.Values, error) {
 		}
 	}
 
-	if err := bound(out, bounds); err != nil {
-		return nil, err
-	}
+	bound(out, bounds)
 	return out, nil
 }
 
@@ -126,6 +154,11 @@ func screenTableRead(in url.Values, bounds QueryBounds) (url.Values, error) {
 func screenReserved(out url.Values, key string, values []string) error {
 	switch key {
 	case "_select":
+		// One comma-separated value, not one value per field: upstream reads
+		// _select at two sinks, and CountByRequest takes only the first value
+		// of the parameter, so a second value would be a column the count
+		// silently dropped.
+		fields := []string{}
 		for _, v := range values {
 			for _, field := range strings.Split(v, ",") {
 				field = strings.TrimSpace(field)
@@ -135,8 +168,11 @@ func screenReserved(out url.Values, key string, values []string) error {
 				if !isSelectField(field) {
 					return refuse("_select takes column names, * or one of SUM AVG MAX MIN STDDEV VARIANCE as FUNC:column[:alias]")
 				}
-				out.Add("_select", field)
+				fields = append(fields, field)
 			}
+		}
+		if len(fields) > 0 {
+			out.Set("_select", strings.Join(fields, ","))
 		}
 	case "_count":
 		v, err := one(key, values)
@@ -171,23 +207,23 @@ func screenReserved(out url.Values, key string, values []string) error {
 		if err != nil {
 			return err
 		}
-		for _, field := range strings.Split(v, ",") {
-			if !identRe.MatchString(strings.TrimPrefix(field, "-")) {
-				return refuse("_order takes column names, each optionally prefixed with - for descending")
-			}
+		list, ok := nameList(v, func(field string) bool {
+			return identRe.MatchString(strings.TrimPrefix(field, "-"))
+		})
+		if !ok {
+			return refuse("_order takes column names, each optionally prefixed with - for descending")
 		}
-		out.Set("_order", v)
+		out.Set("_order", list)
 	case "_groupby":
 		v, err := one(key, values)
 		if err != nil {
 			return err
 		}
-		for _, field := range strings.Split(v, ",") {
-			if !identRe.MatchString(strings.TrimSpace(field)) {
-				return refuse("_groupby takes column names")
-			}
+		list, ok := nameList(v, identRe.MatchString)
+		if !ok {
+			return refuse("_groupby takes column names")
 		}
-		out.Set("_groupby", v)
+		out.Set("_groupby", list)
 	case "_page", "_page_size":
 		v, err := one(key, values)
 		if err != nil {
@@ -201,9 +237,36 @@ func screenReserved(out url.Values, key string, values []string) error {
 		}
 		out.Set(key, v)
 	default:
-		return refuse("%s is not a parameter rest serves", key)
+		// Nothing of the caller's is quoted back, not even the name: the
+		// answer says what rest does serve, which is more use to a developer
+		// than an echo and cannot be used to reflect bytes.
+		return refuse("that is not a parameter rest serves; they are %s, and a column name",
+			strings.Join(servedParameters, " "))
 	}
 	return nil
+}
+
+// servedParameters is the list an unknown parameter is answered with. It is
+// the same list as the switch above, and TestScreen_theAnswerNamesWhatIsServed
+// holds the two together.
+var servedParameters = []string{
+	"_select", "_count", "_count_first", "_distinct",
+	"_order", "_groupby", "_page", "_page_size",
+}
+
+// nameList validates every comma-separated item of v with ok and returns the
+// list re-joined from its trimmed items, so what the builders read is the
+// screen's own spelling rather than the caller's.
+func nameList(v string, ok func(string) bool) (string, bool) {
+	fields := strings.Split(v, ",")
+	for i, field := range fields {
+		field = strings.TrimSpace(field)
+		if !ok(field) {
+			return "", false
+		}
+		fields[i] = field
+	}
+	return strings.Join(fields, ","), true
 }
 
 // screenFilter screens one column filter, `column=$op.value` or
@@ -214,7 +277,7 @@ func screenFilter(out url.Values, key string, values []string) error {
 	name := key
 	if suffix := strings.Index(key, ":"); suffix >= 0 {
 		if key[suffix+1:] != "jsonb" {
-			return refuse("%s is not a column shape rest serves", key[suffix+1:])
+			return refuse("the only typed filter rest serves is column->>key:jsonb")
 		}
 		left, jsonKey, found := strings.Cut(key[:suffix], "->>")
 		if !found || !identRe.MatchString(jsonKey) {
@@ -226,11 +289,12 @@ func screenFilter(out url.Values, key string, values []string) error {
 		return refuse("a filter names one column of the table")
 	}
 	for _, v := range values {
-		if op := operatorRe.FindStringIndex(v); op != nil {
-			if op[0] != 0 {
-				return refuse("a filter's operator is written at the front of its value, as $op.")
+		found := operatorRe.FindAllString(v, 2)
+		if len(found) > 0 {
+			if len(found) > 1 || !strings.HasPrefix(v, found[0]) {
+				return refuse("a filter takes one operator, written at the front of its value as $op.")
 			}
-			if _, ok := filterOperators[v[1:op[1]-1]]; !ok {
+			if _, ok := filterOperators[operatorName.Replace(found[0])]; !ok {
 				return refuse("that is not an operator rest serves")
 			}
 		}
@@ -242,23 +306,17 @@ func screenFilter(out url.Values, key string, values []string) error {
 // bound holds the read to its page. A page larger than the ceiling is capped
 // rather than refused, and a read that asked for no page at all is given the
 // ceiling, so every read carries a LIMIT.
-func bound(out url.Values, bounds QueryBounds) error {
+func bound(out url.Values, bounds QueryBounds) {
 	if out.Get("_page") == "" {
 		out.Set("_page", "1")
 		if out.Get("_page_size") == "" {
 			out.Set("_page_size", strconv.Itoa(bounds.MaxPageSize))
 		}
 	}
-	if size := out.Get("_page_size"); size != "" {
-		n, err := strconv.Atoi(size)
-		if err != nil {
-			return refuse("_page_size takes a whole number")
-		}
-		if n > bounds.MaxPageSize {
-			out.Set("_page_size", strconv.Itoa(bounds.MaxPageSize))
-		}
+	// The value is digits, screened above, so it parses.
+	if n, err := strconv.Atoi(out.Get("_page_size")); err == nil && n > bounds.MaxPageSize {
+		out.Set("_page_size", strconv.Itoa(bounds.MaxPageSize))
 	}
-	return nil
 }
 
 // isSelectField reports whether field is one _select item rest serves.

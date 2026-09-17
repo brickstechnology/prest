@@ -12,6 +12,9 @@ package controllers
 // a Database that counts the connections it is given.
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -147,18 +150,27 @@ var kept = []parameter{{
 		"_count=id;SELECT 1",
 		"_count=pg_catalog.pg_authid",
 		"_count=private.secret",
+		"_count=other_project.public.posts",
 		"_count=count(*)",
 		"_count=id,title",    // COUNT takes one argument
 		"_count=*&_count=id", // given twice
 	},
 }, {
-	name:    "_count_first",
-	served:  []string{"_count=*&_count_first=true"},
-	refused: []string{"_count=*&_count_first=1", "_count=*&_count_first=yes", "_count=*&_count_first="},
+	name:   "_count_first",
+	served: []string{"_count=*&_count_first=true"},
+	refused: []string{
+		"_count=*&_count_first=1", "_count=*&_count_first=yes", "_count=*&_count_first=",
+		"_count=*&_count_first=true;SELECT 1",
+		"_count=*&_count_first=pg_catalog.pg_authid",
+	},
 }, {
-	name:    "_distinct",
-	served:  []string{"_distinct=true", "_distinct=false"},
-	refused: []string{"_distinct=TRUE", "_distinct=true--", "_distinct=1"},
+	name:   "_distinct",
+	served: []string{"_distinct=true", "_distinct=false"},
+	refused: []string{
+		"_distinct=TRUE", "_distinct=true--", "_distinct=1",
+		"_distinct=true) UNION SELECT 1 FROM pg_authid--",
+		"_distinct=private.secret",
+	},
 }, {
 	name:   "_order",
 	served: []string{"_order=id", "_order=-id", "_order=id,-title"},
@@ -167,7 +179,9 @@ var kept = []parameter{{
 		"_order=id--",
 		`_order=id"`,
 		"_order=public.posts.id",
+		"_order=private.secret",
 		"_order=pg_catalog.pg_authid",
+		"_order=other_project.public.posts",
 		"_order=(SELECT 1)",
 		"_order=id DESC", // upstream spells descending with a leading -
 	},
@@ -179,7 +193,9 @@ var kept = []parameter{{
 		"_groupby=time_bucket('1 minute',ts)",      // an allowlisted function call
 		"_groupby=pg_sleep(1)",
 		"_groupby=title;SELECT 1",
+		"_groupby=private.secret",
 		"_groupby=pg_catalog.pg_authid",
+		"_groupby=other_project.public.posts",
 		`_groupby=title"`,
 	},
 }, {
@@ -191,8 +207,19 @@ var kept = []parameter{{
 		"_page=1;SELECT 1",
 		"_page=one",
 		"_page=1&_page=2",
+		"_page=1 OFFSET 0",
+		"_page=pg_catalog.pg_authid",
+	},
+}, {
+	name:   "_page_size",
+	served: []string{"_page=1&_page_size=1", "_page=1&_page_size=100"},
+	refused: []string{
 		"_page_size=0",
 		"_page_size=ten",
+		"_page_size=10--",
+		"_page_size=10;SELECT 1",
+		"_page_size=1&_page_size=2",
+		"_page_size=private.secret",
 	},
 }, {
 	name: "a column filter",
@@ -213,18 +240,43 @@ var kept = []parameter{{
 		"public.posts.id=$eq.1",             // a qualified name
 		"pg_catalog.pg_authid=$eq.1",        // the catalog
 		"private.secret=$eq.1",              // another schema
+		"other_project.public.posts=$eq.1",  // another Database
 		`id"=$eq.1`,                         // quoting
 		"id--=$eq.1",                        // a comment
+		"id;SELECT 1=$eq.1",                 // a stacked statement
 		"id=$ltreematch.*.a",                // an operator the review removed
 		"id=$nosuchop.1",                    // an operator that does not exist
 		"title=x $eq. y",                    // an operator found mid-value
+		"title=$eq.a$ne.b",                  // a second operator, which upstream also strips
 		"body->>author->>x:jsonb=$eq.ana",   // a jsonb key that is not a name
 		"body->>'author':jsonb=$eq.ana",     // quoting, in the jsonb key
+		"private.body->>author:jsonb=$eq.a", // another schema, in the jsonb column
 		"title:tsquery=x",                   // full-text search, removed
 		"embedding:vecdist=l2:lt:[1,2]:0.5", // pgvector, removed
 		"title:nosuchtype=x",
 	},
 }}
+
+// upstream's own operator regex ends in an unescaped `.`, so it reads any byte
+// after the name — a space included — and GetQueryOperator then strips the `$`
+// and the spaces. A screen that looked for `$op.` literally would see no
+// operator in any of these and wave the value through to a builder that then
+// applied one. These are that hole, closed.
+var operatorsSpeltTheOtherWay = []string{
+	"id=$ltreematch x",     // the ltree match operator: a caller's POSIX regex
+	"id=$ltreelanc x",      //
+	"id=$ltreerdesc x",     //
+	"id=$ltreematchtxt x",  //
+	"id=abc$ltreematch x",  // and not at the front of the value either
+	"id=$nosuchoperator x", //
+}
+
+func TestScreen_anOperatorSpeltTheWayUpstreamReadsItIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, query := range operatorsSpeltTheOtherWay {
+		refusedBeforeAnySQL(t, query)
+	}
+}
 
 // removed is every parameter the review removes, and the spellings of it that
 // must now be refused.
@@ -304,12 +356,57 @@ func TestScreen_theReviewNamesEveryParameterTheTreeReads(t *testing.T) {
 	}
 	for _, name := range []string{
 		"_select", "_count", "_count_first", "_distinct", "_order", "_groupby",
-		"_page", "a column filter",
+		"_page", "_page_size", "a column filter",
 		"_join", "_or", "_korder", "_renderer", "_time_bucket", "_returning",
 		"_param", "_header", "_include_system_schemas",
 	} {
 		require.True(t, judged[name], "%s is in the tree and not in the review", name)
 	}
+}
+
+// An unknown parameter is answered with what rest does serve, and that list is
+// the switch itself: a parameter added to one and not the other would make the
+// answer a lie.
+func TestScreen_theAnswerNamesWhatIsServed(t *testing.T) {
+	t.Parallel()
+	_, err := screenOf(t, "_not_a_parameter=1")
+	require.ErrorIs(t, err, ErrQueryNotAccepted)
+	for _, name := range servedParameters {
+		require.Contains(t, err.Error(), name)
+		_, err := screenOf(t, name+"=") // whatever it answers, it is not "unknown"
+		if err != nil {
+			require.NotContains(t, err.Error(), "not a parameter rest serves", name)
+		}
+	}
+	// And nothing of the caller's is quoted back.
+	_, err = screenOf(t, "_haxx0r_<script>=1")
+	require.NotContains(t, err.Error(), "haxx0r")
+}
+
+// _select reaches two sinks, and CountByRequest reads only the first value of
+// the parameter. The screen hands over one comma-separated value so the count
+// and the projection are built from the same columns.
+func TestScreen_selectIsOneValueSoTheCountSeesEveryColumn(t *testing.T) {
+	t.Parallel()
+	screened, err := screenOf(t, "_count=*&_select=id,title")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id,title"}, screened["_select"])
+	require.Equal(t, "id,title", screened.Get("_select"))
+
+	// Given twice, it is still one value.
+	screened, err = screenOf(t, "_select=id&_select=title")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id,title"}, screened["_select"])
+}
+
+// What the builders read is the screen's spelling, not the caller's.
+func TestScreen_handsOverItsOwnSpelling(t *testing.T) {
+	t.Parallel()
+	screened, err := screenOf(t, "_select= id , title &_groupby= title &_order= -id ")
+	require.NoError(t, err)
+	require.Equal(t, "id,title", screened.Get("_select"))
+	require.Equal(t, "title", screened.Get("_groupby"))
+	require.Equal(t, "-id", screened.Get("_order"))
 }
 
 // ── The bounds ──────────────────────────────────────────────────────────────
@@ -343,15 +440,69 @@ func TestScreen_boundsEveryRead(t *testing.T) {
 	require.Equal(t, "100", screened.Get("_page_size"))
 }
 
-func TestScreen_theCeilingIsTheResearchsOwnNumber(t *testing.T) {
+func TestScreen_theCeilingsAreTheResearchsOwnNumbers(t *testing.T) {
 	t.Parallel()
 	// docs/research/QUERY-BOUNDS-AND-FAIRNESS.md §1.1: Loki's
 	// max_entries_limit_per_query, 5000 log lines returned per query — the one
-	// rows-returned limit in that survey with a real, non-zero default.
+	// rows-returned limit in that survey with a real, non-zero default. §1.3:
+	// VictoriaLogs' -search.maxQueryLen, 16KB, the one query-complexity bound
+	// in it expressed as a hard byte cap.
 	require.Equal(t, 5000, defaultMaxPageSize)
-	// And a handler built with no bounds at all still carries it, so a caller
-	// cannot reach an unbounded read through a miswired composition.
+	require.Equal(t, 16384, defaultMaxQueryLen)
+	// And a handler built with no bounds at all still carries both, so a
+	// caller cannot reach an unbounded read through a miswired composition.
 	require.Equal(t, 5000, QueryBounds{}.withDefaults().MaxPageSize)
+	require.Equal(t, 16384, QueryBounds{}.withDefaults().MaxQueryLen)
+}
+
+// A query string longer than the bound is refused before it is parsed: every
+// filter in it is a predicate built and a parameter bound, which is work the
+// page ceiling and the time limit are both downstream of.
+func TestTableRead_aQueryStringLongerThanTheBoundIsRefused(t *testing.T) {
+	t.Parallel()
+	reader := &recordingReader{answer: answering(`[{"title":"a row the caller must not get"}]`, nil)}
+	h := anonymousRead(t, staticRoles{"prest-test": "app_anon"}, reader, "public")
+
+	filters := make([]string, 0, 4000)
+	for i := range 4000 {
+		filters = append(filters, fmt.Sprintf("column_%d=$eq.%d", i, i))
+	}
+	long := strings.Join(filters, "&")
+	require.Greater(t, len(long), defaultMaxQueryLen)
+
+	rec := selectPosts(h, "public", "?"+long)
+	require.Equal(t, http.StatusRequestURITooLong, rec.Code, rec.Body.String())
+	require.Empty(t, reader.recorded())
+
+	// The control: the same shape, inside the bound, is read.
+	rec = selectPosts(h, "public", "?"+strings.Join(filters[:10], "&"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, reader.recorded(), 1)
+}
+
+// The request deadline and the statement's own limit are the same answer: a
+// caller can do the same thing about either.
+func TestTableRead_aRequestPastItsDeadlineIsAnswered504(t *testing.T) {
+	t.Parallel()
+	reader := &recordingReader{answer: answering("", context.DeadlineExceeded)}
+	h := anonymousRead(t, staticRoles{"prest-test": "app_anon"}, reader, "public")
+
+	rec := selectPosts(h, "public", "")
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "time limit")
+	require.NotContains(t, rec.Body.String(), "context deadline exceeded")
+}
+
+// A fault of rest's own is not reported as the Database's.
+func TestTableRead_aFaultOfRestsOwnIsNotTheDatabases(t *testing.T) {
+	t.Parallel()
+	reader := &recordingReader{answer: answering("", errors.New("json: unsupported value"))}
+	h := anonymousRead(t, staticRoles{"prest-test": "app_anon"}, reader, "public")
+
+	rec := selectPosts(h, "public", "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "the read could not be completed")
+	require.NotContains(t, rec.Body.String(), "json: unsupported value")
 }
 
 // ── The screen is an allowlist by construction ──────────────────────────────

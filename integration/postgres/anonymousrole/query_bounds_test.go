@@ -171,13 +171,23 @@ func TestRest_noErrorAnswerCarriesASecret(t *testing.T) {
 		// A Database rest was not given, and a schema it does not serve.
 		{"/not-a-project/public/" + many, http.StatusNotFound},
 		{"/" + alias + "/" + private + "/posts", http.StatusNotFound},
-		// The query string, refused.
+		// The query string, refused, in each of its three shapes.
 		{"/" + alias + "/public/" + many + "?_join=inner:pg_catalog.pg_class:public." + many + ".id:$eq:pg_class.oid", http.StatusBadRequest},
+		{"/" + alias + "/public/" + many + "?_not_a_parameter=1", http.StatusBadRequest},
+		{"/" + alias + "/public/" + many + "?title=$ltreematch%20x", http.StatusBadRequest},
 	} {
 		status, body := get(t, rest, c.path)
 		require.Equal(t, c.status, status, "%s: %s", c.path, body)
 		requireNoSecrets(t, cfg, body)
 	}
+
+	// The role that could not be entered, which is the one 500 a live Database
+	// can produce. #546 proves it serves nothing; this proves it says nothing.
+	stranded := restAs(t, cfg, stranger)
+	status, body := get(t, stranded, "/"+alias+"/public/"+many)
+	require.Equal(t, http.StatusInternalServerError, status, body)
+	requireNoSecrets(t, cfg, body)
+	require.NotContains(t, body, stranger)
 }
 
 // What the anonymous role could read outside public, rest refuses itself. The

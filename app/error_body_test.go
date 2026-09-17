@@ -6,6 +6,7 @@ package app_test
 // no port; the detail is logged where only an operator reads it.
 
 import (
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,14 +70,47 @@ func TestTableRead_noErrorAnswerCarriesASecret(t *testing.T) {
 	}
 }
 
-// The one error answer that quotes the Database is #546's: a privilege the
-// anonymous role lacks answers 403 in Postgres's own words, which name the
-// table and nothing else.
-func TestTableRead_theRoleThatCouldNotBeEntered_saysOnlyThat(t *testing.T) {
+// A Database that is not listening at all: the connection is refused by the
+// operating system, which is the shape the ticket names. Upstream answered
+// this one with `dial tcp 127.0.0.1:<port>: connect: connection refused`.
+func TestTableRead_aDatabaseThatIsNotThere_saysNothingAboutWhereItIsNot(t *testing.T) {
+	// A port nothing is listening on: taken and given back.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+
+	rest := newRest(t, &countingDatabase{port: port})
+
+	rec := serve(rest, "GET /given/public/posts")
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	requireNoSecrets(t, port, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "refused")
+	require.NotContains(t, rec.Body.String(), "connect")
+}
+
+// A Database that answered nothing is not a role failure, so an operator
+// reading the answer is not sent to look at the grants.
+func TestTableRead_aDeadDatabaseIsNotReportedAsARoleFailure(t *testing.T) {
 	db := newCountingDatabase(t)
 	rest := newRest(t, db)
 
 	rec := serve(rest, "GET /given/public/posts")
 	require.False(t, strings.Contains(rec.Body.String(), "role"),
 		"a Database that answered nothing is not a role failure: %s", rec.Body)
+}
+
+// The query string longer than rest reads, through the composed stack.
+func TestTableRead_aQueryStringTooLongIsRefusedWithoutADatabase(t *testing.T) {
+	db := newCountingDatabase(t)
+	rest := newRest(t, db)
+
+	filters := make([]string, 0, 4000)
+	for i := range 4000 {
+		filters = append(filters, "column_"+strconv.Itoa(i)+"=$eq."+strconv.Itoa(i))
+	}
+	rec := serve(rest, "GET /given/public/posts?"+strings.Join(filters, "&"))
+	require.Equal(t, http.StatusRequestURITooLong, rec.Code, rec.Body.String())
+	requireNoSecrets(t, db.port, rec.Body.String())
+	db.requireNoConnection(t)
 }

@@ -2,8 +2,11 @@ package controllers
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -88,6 +91,10 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	// before any connection is opened. query_screen.go is the second wall;
 	// what the builders below read is the query it rebuilt, never the
 	// caller's own.
+	if len(r.URL.RawQuery) > h.bounds.MaxQueryLen {
+		jsonError(w, queryTooLong, http.StatusRequestURITooLong)
+		return
+	}
 	screened, err := screenTableRead(r.URL.Query(), h.bounds)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
@@ -231,7 +238,7 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 		// the caller. #545 found upstream answering with the driver's own
 		// error, the Database's host and port included.
 		log.Errorln(logsafe.Error(err))
-		status, message := readFailure(err, schema, table)
+		status, message := readFailure(err, table)
 		jsonError(w, message, status)
 		return
 	}
@@ -259,7 +266,7 @@ const (
 // here is built from the driver's words except the one message #546 kept —
 // Postgres's own account of a privilege the anonymous role lacks, which names
 // the relation and nothing about where the Database is.
-func readFailure(err error, schema, table string) (int, string) {
+func readFailure(err error, table string) (int, string) {
 	switch {
 	case errors.Is(err, adapters.ErrRoleNotEntered), errors.Is(err, adapters.ErrNoAnonymousRole):
 		return http.StatusInternalServerError, adapters.ErrRoleNotEntered.Error()
@@ -282,12 +289,19 @@ func readFailure(err error, schema, table string) (int, string) {
 	}
 	// Upstream's own shape, kept so a Scanner that carries a plain error still
 	// answers 404 for a relation that is not there.
-	if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
+	if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, servedSchema, table)) {
 		return http.StatusNotFound, "no such table"
 	}
-	// Everything left is the Database not answering: refused, unreachable,
-	// closed mid-read. What that would say is where it is.
-	return http.StatusBadGateway, "the Database could not be read"
+	// The Database not answering: refused, unreachable, closed mid-read. What
+	// the driver would have said is where it is, so none of it is repeated.
+	var netErr net.Error
+	if errors.As(err, &netErr) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) {
+		return http.StatusBadGateway, "the Database could not be read"
+	}
+	// Everything left is rest's own fault, not the Database's, and saying so
+	// is the difference between an operator looking at the right thing and the
+	// wrong one.
+	return http.StatusInternalServerError, "the read could not be completed"
 }
 
 // timeLimitMessage is what a read cancelled by the time limit says. It is one

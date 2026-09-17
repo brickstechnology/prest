@@ -143,10 +143,14 @@ you mean the files, and the directory only when the patch owns all of it.
     `public`. Reads are bounded: a page-size ceiling of 5000, capped rather than
     refused and given to a read that asks for no page, and a 30s
     `SET LOCAL statement_timeout` inside patch 5's transaction, answering 504.
-    An error answer is now one of a fixed set — upstream returned the driver's
-    words, the Database's host and port included. `docs/miniship/query-string.md`
-    is the review: every parameter, kept, restricted or removed, and why, with
-    the two bounds' figures and where each was taken from.
+    A third bound, a 16KB ceiling on the query string itself, answers 414 and is
+    the one refusal that reads nothing of it. The four `ltree` operators go too:
+    on a text column `~` is a caller's POSIX regular expression. An error answer
+    is now one of a fixed set — upstream returned the driver's words, the
+    Database's host and port included — and quotes nothing of the request back.
+    [`docs/miniship/query-string.md`](docs/miniship/query-string.md) is the
+    review: every parameter, kept, restricted or removed, and why, with the
+    three bounds' figures and where each was taken from.
     Paths: `docs/miniship/`, `controllers/query_screen.go`,
     `controllers/query_screen_test.go`, `controllers/crud.go`,
     `controllers/crud_test.go`, `controllers/deps.go`,
@@ -266,7 +270,11 @@ this one did not — two commits is a small sample of what a release moves.
 deployed `prestd` through upstream's whole route table, and skip unless
 `make test-integration` has started one. They assert routes this fork removes,
 so that target is not run here. In `miniship.yml` they skip, 109 of them, and
-80 Postgres-backed tests run.
+**93** Postgres-backed tests run. The first number is upstream's and moves with
+a rebase; the second is this branch's and moves whenever a patch adds a subject,
+so treat both as the last measurement rather than a promise. `miniship.yml`
+prints them on every run's summary, beside the line
+`integration/postgres/anonymousrole` prints about its own subjects.
 
 ## Upstream workflows, and which run here
 

@@ -25,23 +25,23 @@ type AuthConfig struct {
 
 // Deps bundles dependencies for HTTP handlers.
 type Deps struct {
-	Catalog            adapters.CatalogQuerier
-	Builder            adapters.RequestQueryBuilder
-	Executor           adapters.QueryExecutor
-	SQL                adapters.SQLBuilder
-	Perms              adapters.PermissionsChecker
-	Scripts            adapters.ScriptRunner
-	QueryRegistry      adapters.QueryRegistry
-	ScriptPerms        adapters.ScriptPermissionsChecker
-	DB                 adapters.DatabaseRegistry
-	Pinger             adapters.DatabasePinger
-	Readiness          adapters.ReadinessChecker
-	Cache              ResponseCacher
-	AdapterRegistry    adapters.Registry // Multi-database adapter registry
-	SingleDB           bool
-	PGDatabase         string
-	Auth               AuthConfig
-	Expose             config.ExposeConf
+	Catalog         adapters.CatalogQuerier
+	Builder         adapters.RequestQueryBuilder
+	Executor        adapters.QueryExecutor
+	SQL             adapters.SQLBuilder
+	Perms           adapters.PermissionsChecker
+	Scripts         adapters.ScriptRunner
+	QueryRegistry   adapters.QueryRegistry
+	ScriptPerms     adapters.ScriptPermissionsChecker
+	DB              adapters.DatabaseRegistry
+	Pinger          adapters.DatabasePinger
+	Readiness       adapters.ReadinessChecker
+	Cache           ResponseCacher
+	AdapterRegistry adapters.Registry // Multi-database adapter registry
+	SingleDB        bool
+	PGDatabase      string
+	Auth            AuthConfig
+	Expose          config.ExposeConf
 
 	// miniship: the role each database's reads become, and the reader that
 	// becomes it. Nil refuses the table read rather than reading as the login.
@@ -83,7 +83,7 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 		DB:            p.Adapter,
 		Roles:         roles,
 		Reader:        reader,
-		Bounds:        QueryBounds{MaxPageSize: p.PGMaxPageSize},
+		Bounds:        QueryBounds{MaxPageSize: p.PGMaxPageSize, MaxQueryLen: p.PGMaxQueryLen},
 		Pinger:        p.Adapter,
 		Readiness:     p.Adapter,
 		Cache:         cacher,

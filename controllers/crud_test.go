@@ -1134,11 +1134,12 @@ func TestCRUDHandler_Select_ExecutorError(t *testing.T) {
 	rec := runSelect(t, h, http.MethodGet)
 
 	// miniship (#549): upstream answered 400 with the driver's own words. A
-	// read that failed for a reason rest cannot name is the Database not
-	// answering, and what the driver would have said is where it is.
-	require.Equal(t, http.StatusBadGateway, rec.Code)
+	// read that failed for a reason rest cannot name is rest's own fault until
+	// something says otherwise — a network error or a bad connection answers
+	// 502 instead, which app/error_body_test.go covers against a real socket.
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.NotContains(t, rec.Body.String(), "query failed")
-	require.Contains(t, rec.Body.String(), "the Database could not be read")
+	require.Contains(t, rec.Body.String(), "the read could not be completed")
 }
 
 func TestCRUDHandler_Select_NoCacheOnHead(t *testing.T) {

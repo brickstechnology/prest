@@ -26,8 +26,10 @@ a read-only transaction, over `public` alone. That is the floor, and it is the
 in `rest` itself, so that a mistake in those grants is not enough to reach
 anything.
 
-pREST has closed six advisories on this surface, four of them in `_select`,
-`_count` or `_groupby`:
+pREST has closed six advisories on the read path. **Four of them are in the
+table read's own query string** — in `_select`, `_count` or `_groupby` — and the
+other two are next door, in the path parameters and in the `_QUERIES` template
+language:
 
 | Advisory | Where | Fixed in |
 | --- | --- | --- |
@@ -47,11 +49,13 @@ front of them and rebuilds the query string out of what it recognises:
 
 ```mermaid
 flowchart LR
-  C["caller's query string"] --> S{"screenTableRead"}
-  S -->|"not on the list"| R["400, nothing read"]
-  S -->|"kept, and the right shape"| Q["a query string the screen wrote"]
+  C["caller's query string"] --> L{"over 16KB?"}
+  L -->|"yes"| E414["414, not even parsed"]
+  L -->|"no"| S{"screenTableRead"}
+  S -->|"not on the list"| E400["400, nothing read"]
+  S -->|"kept, and the right shape"| Q["a query string the screen wrote<br/>_page and _page_size always set"]
   Q --> B["upstream's builders"]
-  B --> T["SET LOCAL statement_timeout<br/>SET LOCAL ROLE app_anon<br/>read-only transaction"]
+  B --> T["SET LOCAL statement_timeout = 30s<br/>SET LOCAL ROLE app_anon<br/>read-only transaction"]
 ```
 
 **The builders never see a byte the screen did not put there.** A parameter
@@ -61,35 +65,53 @@ switch in `query_screen.go`.
 
 ## Every parameter
 
-`✓` kept · `~` kept, restricted · `✗` removed
+`~` kept, restricted · `✗` removed. **Nothing is kept unrestricted**: every
+parameter below is narrower here than upstream serves it.
 
 ### Kept
 
 | | Parameter | What rest accepts | Why |
 | --- | --- | --- | --- |
-| `~` | `_select` | a comma-separated list of unqualified column names, `*`, or an aggregate written `FUNC:column[:alias]` with `FUNC` one of `SUM AVG MAX MIN STDDEV VARIANCE` | the parameter of GHSA-qvx3-q8vx-9q3c. Restricted twice over: **no dotted name**, so it cannot qualify a schema or a table, and **no quoted or parenthesised expression**, which is the shape all three `_select` advisories used |
+| `~` | `_select` | a comma-separated list of unqualified column names, `*`, or an aggregate written `FUNC:column[:alias]` with `FUNC` one of `SUM AVG MAX MIN STDDEV VARIANCE` | the parameter of GHSA-qvx3-q8vx-9q3c. Restricted twice over: **no dotted name**, so it cannot qualify a schema or a table, and **no quoted or parenthesised expression**, which is the shape the critical advisory used |
 | `~` | `_count` | one unqualified column name, or `*` | the second sink of the same advisory. One name, because `COUNT` takes one argument; upstream accepted a list and built SQL that does not parse |
 | `~` | `_count_first` | `true` | upstream acts on any non-empty value, so `_count_first=0` counted first. One spelling, so the request says what it means |
 | `~` | `_distinct` | `true` or `false` | upstream acts only on the exact string `true` and silently ignores everything else, `_distinct=1` included |
 | `~` | `_order` | a comma-separated list of unqualified column names, each optionally `-` for descending | no dotted name. An `ORDER BY` on an unindexed column sorts the table before the `LIMIT` applies, which is what the time limit below bounds |
 | `~` | `_groupby` | a comma-separated list of unqualified column names | **the `->>having` sub-grammar and the function-expression form are removed** — see below |
-| `~` | `_page` | a whole number, 1 or more | |
+| `~` | `_page` | a whole number, 1 or more | digits only, so no page number reaches the SQL as anything else. Upstream clamped a page below 1 silently; this refuses it |
 | `~` | `_page_size` | a whole number, 1 or more, **capped** at the ceiling | see *The bounds* |
 | `~` | a column filter, `column=value` or `column=$op.value` | `column` is one unqualified name; `$op` is one of the operators below; the value is bound as a parameter and may be anything | the value never reaches the SQL text, so `title=' OR 1=1 --` is a string to compare against and not a statement |
 | `~` | a JSON filter, `column->>key:jsonb=$op.value` | `column` and `key` are both plain names | upstream already required a name for the key and escapes it by doubling quotes; with a name that doubling has nothing to do |
 
-**The operators kept**: `$eq $ne $gt $gte $lt $lte $in $nin $any $some $all
-$null $notnull $true $nottrue $false $notfalse $like $ilike $nlike $nilike`.
+### The operators
 
-The screen keeps that list itself rather than reading
-`postgres.GetQueryOperator`, so an operator upstream adds is refused until it is
-reviewed; a test holds the list to being a subset of upstream's, so an operator
-kept here always resolves to SQL.
+**Kept**: `$eq $ne $gt $gte $lt $lte $in $nin $any $some $all $null $notnull
+$true $nottrue $false $notfalse $like $ilike $nlike $nilike`.
 
-**An operator must be written at the front of its value.** Upstream finds
-`$op.` anywhere in the value with a regular expression and strips *every*
+**Removed**: `$ltreelanc $ltreerdesc $ltreematch $ltreematchtxt`, upstream's four
+`ltree` operators. On an `ltree` column they are containment and match; on a
+text column `~` is a **POSIX regular expression**, which is caller-supplied
+backtracking against every row — and no miniship `Project` schema has an
+`ltree`. The time limit would stop a bad one; not offering it is better.
+
+The screen keeps its own list rather than reading `postgres.GetQueryOperator`,
+so an operator upstream adds is refused until it is reviewed; a test holds the
+list to being a **subset** of upstream's, so an operator kept here always
+resolves to SQL.
+
+**An operator must be written at the front of its value, and there may be only
+one.** Upstream finds an operator anywhere in the value and strips *every*
 occurrence, so `title=x $eq. y` became a filter the caller did not write, over a
 value the caller did not send. The screen refuses that rather than rewriting it.
+
+**The screen matches an operator with upstream's own expression, character for
+character.** Upstream's `removeOperatorRegex` is `` `\$[a-z]+.` `` — that last
+`.` is **not escaped**, so it matches any byte, a space included, and
+`GetQueryOperator` then strips the `$` and the spaces. A screen that looked for
+a literal `$op.` would therefore see **no operator at all** in `$ltreematch x`
+and wave the value through to a builder that then applied `~` to it. That hole
+was found in review, and it is why this one expression is copied rather than
+rewritten: if upstream's changes, the screen's must change with it.
 
 ### Removed
 
@@ -120,13 +142,14 @@ sends a request of every removed shape. The write verbs' body parsing
 ## The bounds
 
 Sized from miniship-cloud's `docs/research/QUERY-BOUNDS-AND-FAIRNESS.md`, which
-read eight query engines' own configuration references and source. The two
+read eight query engines' own configuration references and source. The three
 figures taken, and where each comes from:
 
 | Bound | Value | Taken from |
 | --- | --- | --- |
 | page-size ceiling, `pg.max_page_size` | **5000 rows** | §1.1, Loki's `max_entries_limit_per_query`, *"log lines returned per query"*. §5 of that document counts the rows-returned family: it is the **1 of 6** engine-level scan/row limits that ships with a real, non-zero default. Everything else in the family — ClickHouse's four, Loki's pre-split byte limit — defaults to unlimited, and VictoriaLogs has none at all |
 | statement time limit, `pg.statement_timeout_ms` | **30,000 ms** | §1.3 and §1.6, VictoriaLogs' `-search.maxQueryDuration` and Quickwit's `searcher.request_timeout_secs`, both **30s**. That is the tightest wall-clock default among the seven engines that publish one — Loki's is 1m, Mimir's 2m0s, CloudWatch's a fixed 60m. `rest` faces the internet, so it takes the tightest rather than the median |
+| query-string length, `pg.max_query_len` | **16,384 bytes** | §1.3, VictoriaLogs' `-search.maxQueryLen`, which that document calls *"the one 'query complexity' bound expressed as a hard byte cap in this whole survey"*. **This third bound is beyond the two the ticket named**, and it is here because the review found the gap: a request line may carry a megabyte, every filter in it is a predicate built and a parameter bound, and both bounds above are downstream of that work. It answers **414** and is the only refusal that reads nothing of the query string at all |
 
 **A page larger than the ceiling is capped, not refused**, and **a read that
 asks for no page at all is given the ceiling** — upstream answered such a read
@@ -145,7 +168,7 @@ goes back without it. A statement that runs past it is cancelled by Postgres
 
 504 rather than 503 or 408 follows Loki's own taxonomy (§6 of the same
 document): 504 for a server-side timeout, 499 for a client-cancelled request.
-Setting either bound to `0` disables it; nothing miniship ships does.
+Setting any of the three bounds to `0` disables it; nothing miniship ships does.
 
 ## What an error answer may say
 
@@ -157,13 +180,20 @@ log, through `internal/logsafe`, which redacts credentials.
 
 | What happened | Status | The answer |
 | --- | --- | --- |
-| the query string was not accepted | 400 | `query string not accepted: <the parameter and the rule>` — never the value the caller sent |
+| the query string was longer than `pg.max_query_len` | 414 | `the query string is longer than rest reads` |
+| the query string was not accepted | 400 | `query string not accepted: <the rule>`. **Nothing of the caller's is quoted back — not the value, and not the parameter's name either.** An unknown parameter is answered with the list of the ones `rest` does serve, which is more use to a developer than an echo and cannot be used to reflect bytes |
 | a column that is not there (`42703`) | 400 | `no such column` |
 | the anonymous role holds no grant (`42501`) | 403 | Postgres's own sentence, e.g. `permission denied for table posts`, kept by miniship-cloud#546 so the refusal is the `Database`'s and is legible |
 | a table that is not there, a schema that is not `public`, a `Database` `rest` was not given (`42P01`) | 404 | `no such table` / `schema not served: …` / `database not registered: …` |
 | no anonymous role, or a role that could not be entered | 500 | `could not become the anonymous role` |
+| a fault of `rest`'s own, not the `Database`'s | 500 | `the read could not be completed` |
 | the `Database` did not answer: refused, unreachable, closed mid-read | 502 | `the Database could not be read` |
 | the statement, or the request, ran past its limit (`57014`, `context.DeadlineExceeded`) | 504 | the sentence above |
+
+`rest`'s own 500 and the `Database`'s 502 are told apart rather than lumped
+together: a network error, a bad connection or an unexpected end of file is the
+`Database`'s, and everything else is `rest`'s own. That difference is whether an operator reading the
+answer goes to look at the `Database` or at `rest`.
 
 The three answers that quote the request — the schema, the `Database` alias and
 the table — quote **only the caller's own path segments**, which they already
@@ -177,9 +207,20 @@ the login `rest` connects with.
   unreachable. If a write route is ever added, they are unreviewed.
 - **It did not review the `_QUERIES` template language**, for the same reason.
   GHSA-5rwc-2hg5-2hmc and GHSA-r3hj-2fxx-7f3h are both in that language.
-- **It did not measure the two bounds against a miniship workload.** 5000 and
-  30s are the field's numbers, taken deliberately rather than tuned; the first
-  `Project` with real traffic is what should move them.
+- **It did not measure the three bounds against a miniship workload.** 5000, 30s
+  and 16KB are the field's numbers, taken deliberately rather than tuned; the
+  first `Project` with real traffic is what should move them.
 - **It did not change `chkInvalidIdentifier`**, upstream's own permissive
   identifier check, which is still reachable from the unrouted catalog
   handlers. The screen does not rely on it.
+- **It left `_or` out rather than fixing it.** Restoring it means one parser
+  shared between the screen and `WhereByRequest`, which is a change to
+  upstream's own builder and a rebase cost; nothing in spec
+  miniship-cloud#397's user stories needs it yet.
+- **It did not bound concurrency.** `docs/research/QUERY-BOUNDS-AND-FAIRNESS.md`
+  §2 found the field converges on a per-tenant FIFO queue drained round-robin
+  (Loki and Mimir, in near-identical words), and `rest` has nothing of the kind:
+  one `Project` can occupy every connection in its own pool. The pool is
+  per-`Database` and bounded (`pg.maxopenconn`), so one tenant cannot starve
+  another's pool — but a tenant can starve itself, and `rest`'s own goroutines
+  are unbounded. That is a ticket, not a line in this one.
