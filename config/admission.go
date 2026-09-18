@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/prest/prest/v2/internal/ident"
@@ -76,6 +78,18 @@ func parseAdmission(v *viper.Viper, cfg *Prest) {
 	if key := envFirst("ADMISSION_KEY", "PREST_ADMISSION_KEY"); key != "" {
 		cfg.Admission.Key = key
 	}
+	// All five, and not only the two an install has to write. A compose file
+	// that says ADMISSION_URL and ADMISSION_KEY and then finds ADMISSION_WINDOW
+	// silently ignored is a trap, and it caught this fork's own test first.
+	if timeout := envDuration("ADMISSION_TIMEOUT", "PREST_ADMISSION_TIMEOUT"); timeout > 0 {
+		cfg.Admission.Timeout = timeout
+	}
+	if window := envDuration("ADMISSION_WINDOW", "PREST_ADMISSION_WINDOW"); window > 0 {
+		cfg.Admission.Window = window
+	}
+	if max := envInt("ADMISSION_MAX_PROJECTS", "PREST_ADMISSION_MAX_PROJECTS"); max > 0 {
+		cfg.Admission.MaxProjects = max
+	}
 	cfg.Admission = cfg.Admission.WithDefaults()
 }
 
@@ -93,6 +107,37 @@ func (c AdmissionConf) WithDefaults() AdmissionConf {
 		c.MaxProjects = DefaultAdmissionMaxProjects
 	}
 	return c
+}
+
+// envDuration is the first of keys that is set and parses as a duration.
+// Anything else is left to the default, with a line saying so: a window
+// somebody spelled wrong should not silently become five seconds without
+// saying it was ignored.
+func envDuration(keys ...string) time.Duration {
+	raw := envFirst(keys...)
+	if raw == "" {
+		return 0
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		slog.Warn("admission setting ignored: not a duration", "keys", keys, "value", raw)
+		return 0
+	}
+	return value
+}
+
+// envInt is envDuration for a count.
+func envInt(keys ...string) int {
+	raw := envFirst(keys...)
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		slog.Warn("admission setting ignored: not a number", "keys", keys, "value", raw)
+		return 0
+	}
+	return value
 }
 
 // AdmittedDatabaseConf is the registry entry a Project admitted while rest
