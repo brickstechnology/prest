@@ -244,8 +244,16 @@ you mean the files, and the directory only when the patch owns all of it.
     which tells a browser its request was wrong when nothing about it was. Both
     are the `Database` not being readable — 502 — and #549's `readFailure`
     already knew that; it only had to be given the error.
+    A fourth thing, from the same slice: `ADMISSION_TIMEOUT`,
+    `ADMISSION_WINDOW` and `ADMISSION_MAX_PROJECTS` are read unprefixed now, as
+    `ADMISSION_URL` and `ADMISSION_KEY` already were. A compose file that
+    spells two of the five without a prefix and finds the other three silently
+    ignored is a trap, and it caught the public monorepo's own stack test
+    first. A value that does not parse is left at its default *and says so*,
+    rather than being read as zero.
     Paths: `admission/gate.go`, `app/app.go`, `controllers/crud.go`,
-    `adapters/postgres/anonymous_role.go`,
+    `adapters/postgres/anonymous_role.go`, `config/admission.go`,
+    `config/admission_test.go`,
     `integration/postgres/admission/admission_test.go`,
     `integration/postgres/twoprojects/two_projects_test.go`
 

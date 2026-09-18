@@ -102,6 +102,39 @@ func TestParseAdmission_readsBothSpellings(t *testing.T) {
 	require.Equal(t, "a-derived-key", prefixed.Admission.Key)
 }
 
+// All five, and not only the two an install has to write. A compose file that
+// says ADMISSION_URL and ADMISSION_KEY unprefixed and then finds
+// ADMISSION_WINDOW silently ignored is a trap, and it caught this fork's own
+// stack test before anybody else.
+func TestParseAdmission_readsEveryNameUnprefixed(t *testing.T) {
+	v := viper.New()
+	t.Setenv("ADMISSION_URL", "http://api:4000/database")
+	t.Setenv("ADMISSION_TIMEOUT", "250ms")
+	t.Setenv("ADMISSION_WINDOW", "2s")
+	t.Setenv("ADMISSION_MAX_PROJECTS", "7")
+
+	cfg := &Prest{}
+	parseAdmission(v, cfg)
+	require.Equal(t, 250*time.Millisecond, cfg.Admission.Timeout)
+	require.Equal(t, 2*time.Second, cfg.Admission.Window)
+	require.Equal(t, 7, cfg.Admission.MaxProjects)
+}
+
+// And one that is not a duration is left at the default rather than read as
+// zero, which WithDefaults would then quietly turn into the default anyway —
+// the difference is the line in the log saying it was ignored.
+func TestParseAdmission_aSettingThatIsNotANumberIsIgnored(t *testing.T) {
+	v := viper.New()
+	t.Setenv("ADMISSION_URL", "http://api:4000/database")
+	t.Setenv("ADMISSION_WINDOW", "two seconds")
+	t.Setenv("ADMISSION_MAX_PROJECTS", "lots")
+
+	cfg := &Prest{}
+	parseAdmission(v, cfg)
+	require.Equal(t, DefaultAdmissionWindow, cfg.Admission.Window)
+	require.Equal(t, DefaultAdmissionMaxProjects, cfg.Admission.MaxProjects)
+}
+
 // No address is rest without a lookup at all, which is the shape #547 shipped:
 // the Databases it was given, and a name that is not one of them refused.
 func TestParseAdmission_noAddressIsRestWithoutALookup(t *testing.T) {
