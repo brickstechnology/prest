@@ -150,7 +150,7 @@ type Prest struct {
 	// miniship (#548): where rest asks about a Project it was not given.
 	// Empty is rest without a lookup: the Databases above, and a 404 for
 	// every other name.
-	Admission AdmissionConf
+	Admission            AdmissionConf
 	HTTPSMode            bool
 	HTTPSCert            string
 	HTTPSKey             string

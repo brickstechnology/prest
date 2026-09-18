@@ -88,21 +88,24 @@ const maxAnswer = 64 << 10
 // HTTPAnswerer asks the answerer over HTTP, at an address inside the install.
 type HTTPAnswerer struct {
 	base   string
-	token  string
+	key    string
 	client *http.Client
+	now    func() time.Time
 }
 
-// NewHTTPAnswerer asks base for one Project at a time, presenting token.
+// NewHTTPAnswerer asks base for one Project at a time, proving itself with a
+// service token minted from key — the derived key for the lookup route, never
+// the install's root. assertion.go says what one of those is.
 //
 // The client follows no redirect: a redirect is another address, and rest's
-// internal credential goes to the one address an operator configured and to
-// no address an answer named. timeout bounds the whole exchange, so a Project
-// with no pool is refused rather than left waiting on a socket that never
-// answers.
-func NewHTTPAnswerer(base, token string, timeout time.Duration) *HTTPAnswerer {
+// credential goes to the one address an operator configured and to no address
+// an answer named. timeout bounds the whole exchange, so a Project with no
+// pool is refused rather than left waiting on a socket that never answers.
+func NewHTTPAnswerer(base, key string, timeout time.Duration) *HTTPAnswerer {
 	return &HTTPAnswerer{
-		base:  strings.TrimRight(base, "/"),
-		token: token,
+		base: strings.TrimRight(base, "/"),
+		key:  key,
+		now:  time.Now,
 		client: &http.Client{
 			Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -114,12 +117,16 @@ func NewHTTPAnswerer(base, token string, timeout time.Duration) *HTTPAnswerer {
 
 // Lookup asks for project alone.
 func (a *HTTPAnswerer) Lookup(ctx context.Context, project string) (Answer, error) {
+	assertion, err := mintAssertion(a.key, a.now())
+	if err != nil {
+		return Answer{}, fmt.Errorf("%w: rest cannot prove itself at the lookup address", ErrUnavailable)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		a.base+"/"+url.PathEscape(project), nil)
 	if err != nil {
 		return Answer{}, fmt.Errorf("%w: %s", ErrUnavailable, "the lookup address is not an address")
 	}
-	req.Header.Set(InternalClientHeader, a.token)
+	req.Header.Set(InternalClientHeader, assertion)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.client.Do(req)
