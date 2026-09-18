@@ -147,6 +147,10 @@ type Prest struct {
 	Adapter              adapters.Adapter
 	EnableDefaultJWT     bool
 	Databases            []DatabaseConf
+	// miniship (#548): where rest asks about a Project it was not given.
+	// Empty is rest without a lookup: the Databases above, and a 404 for
+	// every other name.
+	Admission AdmissionConf
 	HTTPSMode            bool
 	HTTPSCert            string
 	HTTPSKey             string
@@ -189,6 +193,8 @@ func Load() (*Prest, error) {
 	if err := cfg.ValidateEngines(); err != nil {
 		return nil, err
 	}
+	// miniship (#548): the Projects rest was not given, and where to ask.
+	parseAdmission(v, cfg)
 
 	ensureJWTConfig(cfg)
 	ensureQueriesPath(cfg)
@@ -248,6 +254,8 @@ func viperCfg() (*viper.Viper, string) {
 	setEngineDefaults(v)
 	setMySQLDefaults(v)
 	setPostgresDefaults(v)
+	// miniship (#548): the lookup on a miss. See docs/miniship/admission.md.
+	setAdmissionDefaults(v)
 	setJWTDefaults(v)
 	setCacheDefaults(v)
 	setQueriesDefaults(v)
