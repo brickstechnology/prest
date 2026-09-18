@@ -154,7 +154,7 @@ type Prest struct {
 	// miniship (#548): where rest asks about a Project it was not given.
 	// Empty is rest without a lookup: the Databases above, and a 404 for
 	// every other name.
-	Admission AdmissionConf
+	Admission            AdmissionConf
 	HTTPSMode            bool
 	HTTPSCert            string
 	HTTPSKey             string
@@ -418,7 +418,7 @@ func viperCfg() (*viper.Viper, string) {
 	v.SetDefault("pg.statement_timeout_ms", 30000)
 	// miniship (#548): the lookup on a miss. See docs/miniship/admission.md.
 	v.SetDefault("admission.url", "")
-	v.SetDefault("admission.token", "")
+	v.SetDefault("admission.key", "")
 	v.SetDefault("admission.timeout", DefaultAdmissionTimeout)
 	v.SetDefault("admission.window", DefaultAdmissionWindow)
 	v.SetDefault("admission.max_projects", DefaultAdmissionMaxProjects)

@@ -154,7 +154,7 @@ func admissionGate(cfg *config.Prest, registry adapters.Registry) *admission.Gat
 		return nil
 	}
 	return admission.NewGate(
-		admission.NewHTTPAnswerer(conf.URL, conf.Token, conf.Timeout),
+		admission.NewHTTPAnswerer(conf.URL, conf.Key, conf.Timeout),
 		registry,
 		admission.Pool{
 			Open: func(dbConf config.DatabaseConf) (adapters.Adapter, error) {

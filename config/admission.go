@@ -18,8 +18,10 @@ type AdmissionConf struct {
 	// URL is the address of the process holding the Database plugin. It is
 	// inside the install and is not reachable through the gateway.
 	URL string `mapstructure:"url"`
-	// Token is the internal credential rest presents there.
-	Token string `mapstructure:"token"`
+	// Key is the derived key for the lookup route, base64url, which rest
+	// mints a short-lived service token with on every call. It is never the
+	// install's root secret, and it is never sent.
+	Key string `mapstructure:"key"`
 	// Timeout is how long rest waits for one answer.
 	Timeout time.Duration `mapstructure:"timeout"`
 	// Window is how stale rest's view of one Project may be: how long an
@@ -63,7 +65,7 @@ const (
 func parseAdmission(v *viper.Viper, cfg *Prest) {
 	cfg.Admission = AdmissionConf{
 		URL:         v.GetString("admission.url"),
-		Token:       v.GetString("admission.token"),
+		Key:         v.GetString("admission.key"),
 		Timeout:     v.GetDuration("admission.timeout"),
 		Window:      v.GetDuration("admission.window"),
 		MaxProjects: v.GetInt("admission.max_projects"),
@@ -71,8 +73,8 @@ func parseAdmission(v *viper.Viper, cfg *Prest) {
 	if url := envFirst("ADMISSION_URL", "PREST_ADMISSION_URL"); url != "" {
 		cfg.Admission.URL = url
 	}
-	if token := envFirst("ADMISSION_TOKEN", "PREST_ADMISSION_TOKEN"); token != "" {
-		cfg.Admission.Token = token
+	if key := envFirst("ADMISSION_KEY", "PREST_ADMISSION_KEY"); key != "" {
+		cfg.Admission.Key = key
 	}
 	cfg.Admission = cfg.Admission.WithDefaults()
 }
