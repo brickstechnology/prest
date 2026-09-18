@@ -332,6 +332,13 @@ func readFailure(err error, table string) (int, string) {
 			return http.StatusBadRequest, "no such column"
 		case queryCanceled:
 			return http.StatusGatewayTimeout, timeLimitMessage
+		case invalidPassword, invalidAuthorizationSpecifier:
+			// miniship (#548): the Database refusing rest's own login. It is
+			// reachable and it is answering — it will not let rest in — so
+			// this is not the caller's request being wrong, which is what a
+			// 400 says. It is the one failure a fresh lookup can fix, and by
+			// the time a caller sees this rest has already asked once.
+			return http.StatusBadGateway, "the Database could not be read"
 		}
 		return http.StatusBadRequest, "the read could not be run"
 	}
