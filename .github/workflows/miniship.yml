@@ -89,11 +89,12 @@ jobs:
       # two differ; this step fails when a line is missing, so a run that never
       # reached one of them is not a pass either. There is one line per
       # package, and REST_CENSUS_PACKAGES is how many packages print one —
-      # integration/postgres/anonymousrole and integration/postgres/twoprojects.
+      # integration/postgres/anonymousrole, integration/postgres/twoprojects
+      # and integration/postgres/admission.
       - name: how many database tests ran, and how many skipped
         if: always()
         env:
-          REST_CENSUS_PACKAGES: "2"
+          REST_CENSUS_PACKAGES: "3"
         run: |
           ran="$(grep -c -E '^--- (PASS|FAIL):' integration.log || true)"
           skipped="$(grep -c -E '^--- SKIP:' integration.log || true)"

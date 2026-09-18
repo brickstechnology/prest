@@ -33,7 +33,7 @@ type AdmissionConf struct {
 }
 
 // The three figures, and where each was taken from. None of them was picked
-// for feeling about right; docs/miniship/admission.md is the long form.
+// for feeling about right, and each says below where it came from.
 const (
 	// DefaultAdmissionTimeout is one sixth of the 30s a read itself is given
 	// (#549), so a Project that cannot be admitted is refused well before a

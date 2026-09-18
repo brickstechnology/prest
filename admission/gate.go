@@ -80,11 +80,13 @@ func NewGate(answerer Answerer, registry adapters.Registry, pool Pool, conf conf
 		answerer: answerer,
 		registry: registry,
 		pool:     pool,
-		conf:     func(a Answer) (config.DatabaseConf, error) { return base.AdmittedDatabaseConf(a.Project, a.URL, a.AnonRole) },
-		window:   conf.Window,
-		max:      conf.MaxProjects,
-		now:      time.Now,
-		known:    map[string]*entry{},
+		conf: func(a Answer) (config.DatabaseConf, error) {
+			return base.AdmittedDatabaseConf(a.Project, a.URL, a.AnonRole)
+		},
+		window: conf.Window,
+		max:    conf.MaxProjects,
+		now:    time.Now,
+		known:  map[string]*entry{},
 	}
 }
 

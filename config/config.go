@@ -416,7 +416,8 @@ func viperCfg() (*viper.Viper, string) {
 	v.SetDefault("pg.max_page_size", 5000)
 	v.SetDefault("pg.max_query_len", 16384)
 	v.SetDefault("pg.statement_timeout_ms", 30000)
-	// miniship (#548): the lookup on a miss. See docs/miniship/admission.md.
+	// miniship (#548): the lookup on a miss. admission.go says where each of
+	// the three figures came from.
 	v.SetDefault("admission.url", "")
 	v.SetDefault("admission.key", "")
 	v.SetDefault("admission.timeout", DefaultAdmissionTimeout)

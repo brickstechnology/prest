@@ -87,12 +87,22 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	// does not have is not found. Upstream answers 400. A Project rest has
 	// simply not seen yet is looked up here, once, and then it is a Database
 	// rest was given (#548).
-	roles, reader, err := h.databaseInPath(r.Context(), database)
+	adapter, err := h.databaseInPath(r.Context(), database)
 	if err != nil {
 		status, message := admissionFailure(err)
 		jsonError(w, message, status)
 		return
 	}
+	roles, reader := h.rolesOf(adapter)
+	// miniship: the SQL is built by the adapter that holds this Database too,
+	// and not by whichever one was registered first (#548). tableReference
+	// qualifies a table with the Database's name unless the adapter it is
+	// asked of carries a registry — so a rest that was given no Database and
+	// learned about every one of them by asking built `"alpha"."public"."posts"`
+	// on the default adapter, and Postgres answers a three-part reference with
+	// "cross-database references are not implemented". #547 moved the reader
+	// onto the matched Database's adapter; this is the builder following it.
+	build := h.builderFor(adapter)
 
 	if !validatePathSegments(database, schema, table) {
 		jsonError(w, "invalid identifier in path", http.StatusBadRequest)
@@ -154,12 +164,12 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	selectStr, err := h.sql.SelectFields(cols)
+	selectStr, err := build.SelectFields(cols)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	query := h.sql.SelectSQL(selectStr, database, schema, table)
+	query := build.SelectSQL(selectStr, database, schema, table)
 
 	distinct, err := h.builder.DistinctClause(r)
 	if err != nil {
@@ -179,7 +189,7 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	}
 	countFirst := false
 	if countQuery != "" {
-		query = h.sql.SelectSQL(countQuery, database, schema, table)
+		query = build.SelectSQL(countQuery, database, schema, table)
 		if queries.Get("_count_first") != "" {
 			countFirst = true
 		}
@@ -370,21 +380,18 @@ const timeLimitMessage = "the read ran past the time limit and was cancelled; as
 // plugin, once, for that Project alone. The registry is checked first and the
 // check is the whole of the second call's cost, so a Project's second and
 // later calls cause no lookup.
-func (h *CRUDHandler) databaseInPath(ctx context.Context, database string) (adapters.AnonymousRoles, adapters.RoleReader, error) {
+func (h *CRUDHandler) databaseInPath(ctx context.Context, database string) (adapters.Adapter, error) {
 	if h.registry == nil {
 		if err := validateDatabase(database, h.db, h.singleDB); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return h.roles, h.reader, nil
+		return nil, nil
 	}
 	adapter, err := h.registry.Get(database)
 	if err != nil {
-		adapter, err = h.admit(ctx, database)
-		if err != nil {
-			return nil, nil, err
-		}
+		return h.admit(ctx, database)
 	}
-	return rolesOf(adapter)
+	return adapter, nil
 }
 
 // admit looks a Project up, when rest has an answerer to ask and the name is
@@ -413,8 +420,8 @@ func (h *CRUDHandler) rotated(ctx context.Context, database string) (adapters.Ro
 	if err != nil {
 		return nil, "", false
 	}
-	roles, reader, err := rolesOf(adapter)
-	if err != nil || reader == nil {
+	roles, reader := h.rolesOf(adapter)
+	if reader == nil {
 		return nil, "", false
 	}
 	role, ok := anonymousRole(roles, database)
@@ -424,13 +431,28 @@ func (h *CRUDHandler) rotated(ctx context.Context, database string) (adapters.Ro
 	return reader, role, true
 }
 
-// rolesOf is the role an adapter's reads become and the reader that becomes
-// it. An adapter that can do neither leaves both nil, and the read then
+// rolesOf is the role this Database's reads become and the reader that becomes
+// it. A nil adapter is the no-registry shape, where there is one of each on the
+// handler; an adapter that can do neither leaves both nil, and the read then
 // refuses rather than reading as the login.
-func rolesOf(adapter adapters.Adapter) (adapters.AnonymousRoles, adapters.RoleReader, error) {
+func (h *CRUDHandler) rolesOf(adapter adapters.Adapter) (adapters.AnonymousRoles, adapters.RoleReader) {
+	if adapter == nil {
+		return h.roles, h.reader
+	}
 	roles, _ := adapter.(adapters.AnonymousRoles)
 	reader, _ := adapter.(adapters.RoleReader)
-	return roles, reader, nil
+	return roles, reader
+}
+
+// builderFor is the SQL builder for this Database. It matters because
+// tableReference asks the adapter it is called on whether that adapter carries
+// a registry, and answers a three-part, cross-database reference when it does
+// not — so the builder has to be this Database's own, not the handler's.
+func (h *CRUDHandler) builderFor(adapter adapters.Adapter) adapters.SQLBuilder {
+	if builder, ok := adapter.(adapters.SQLBuilder); ok {
+		return builder
+	}
+	return h.sql
 }
 
 // anonymousRole returns the role reads of database become.

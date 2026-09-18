@@ -43,8 +43,11 @@ const (
 	assertionAlg = "HS256"
 	// assertionTyp keeps a service token from being read as another JWT.
 	assertionTyp = "miniship-link+jwt"
-	// assertionAudience is the route this token opens, and the only one.
-	assertionAudience = "rest"
+	// assertionAudience is the route this token opens, and the only one. It
+	// is named for what it opens rather than for who knocks, which is
+	// audiences.ts's own rule for the six that were there before it: this one
+	// opens a Project's Database address.
+	assertionAudience = "database"
 	// assertionIssuer is who is calling. rest is a service, not a person.
 	assertionIssuer = "rest"
 	// assertionLifetime is five minutes: long enough for a slow call, short

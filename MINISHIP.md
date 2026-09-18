@@ -201,6 +201,36 @@ you mean the files, and the directory only when the patch owns all of it.
     `app/error_body_test.go`,
     `integration/postgres/anonymousrole/query_bounds_test.go`,
     `integration/postgres/anonymousrole/anonymous_role_test.go`
+16. **A `Project` is admitted while `rest` runs, by a lookup on a miss** —
+    upstream reads its registry once at start-up and says in its own
+    documentation that there is no runtime API to add a database, so
+    `Project` 251 interrupted the other 250. A name with no adapter is now a
+    miss, and a miss is where `rest` learns: it asks the process holding the
+    `Database` plugin, once, for that `Project` alone, gets an address and a
+    credential, opens the pool and keeps it. Later calls find it in the
+    adapter registry and ask nothing. `rest` stores nothing — a restart
+    forgets every `Project` and learns each one again on its first call.
+    `admission/` is the lookup and the four things around it, which are the
+    four Neon's own proxy has: the registry as the cache, a permit per
+    `Project` so concurrent first calls cost one lookup, a window so a burst
+    for a name with no `Project` costs one lookup, and an invalidation on an
+    authentication failure so a rotated credential costs exactly one more.
+    The lookup address is internal: `rest` proves itself with a short-lived
+    HS256 service token minted from the route's derived key, aimed at that
+    route alone — the public repository's `packages/api-client`'s
+    `assertion.ts` is the original and `admission/assertion.go` is the Go half
+    of it. Two failures found on the way: the SQL was built by whichever
+    adapter was registered first, so a `rest` given no `Database` at all
+    emitted a three-part cross-database reference; and a name `rest` was not
+    given was quoted back in the answer, which #549's rule forbids. Both are
+    fixed here. `integration/postgres/admission` creates a third `Database`
+    while the process runs, rotates a credential under it, and tries one
+    `Project`'s credential against another's `Database`.
+    Paths: `admission/`, `config/admission.go`, `config/config.go`,
+    `config/admission_test.go`, `controllers/admission.go`,
+    `controllers/crud.go`, `controllers/deps.go`, `app/app.go`,
+    `app/admission_test.go`, `integration/postgres/admission/`,
+    `.github/workflows/miniship.yml`
 
 ## Taking an upstream fix
 
