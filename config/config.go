@@ -254,7 +254,8 @@ func viperCfg() (*viper.Viper, string) {
 	setEngineDefaults(v)
 	setMySQLDefaults(v)
 	setPostgresDefaults(v)
-	// miniship (#548): the lookup on a miss. See docs/miniship/admission.md.
+	// miniship (#548): the lookup on a miss. admission.go says where each of
+	// the three figures came from.
 	setAdmissionDefaults(v)
 	setJWTDefaults(v)
 	setCacheDefaults(v)

@@ -74,7 +74,7 @@ func heldUp(t *testing.T, offered string) {
 
 	require.Equal(t, "HS256", head.Alg)
 	require.Equal(t, "miniship-link+jwt", head.Typ)
-	require.Equal(t, "rest", body.Aud, "the token is aimed at another route")
+	require.Equal(t, "database", body.Aud, "the token is aimed at another route")
 	require.Equal(t, "rest", body.Sub)
 	require.NotEmpty(t, body.Jti)
 	require.Equal(t, int64(300), body.Exp-body.Iat, "five minutes, and no longer")
