@@ -11,8 +11,10 @@ import (
 	"strings"
 
 	"github.com/prest/prest/v2/adapters"
+	"github.com/prest/prest/v2/admission"
 	pctx "github.com/prest/prest/v2/context"
 	"github.com/prest/prest/v2/controllers/auth"
+	"github.com/prest/prest/v2/internal/ident"
 	"github.com/prest/prest/v2/internal/logsafe"
 	"github.com/prest/prest/v2/middlewares"
 
@@ -34,6 +36,10 @@ type CRUDHandler struct {
 	// miniship: the Databases rest was given, one adapter each. Nil is
 	// upstream's one-adapter shape, which the fields above serve.
 	registry adapters.Registry
+	// miniship: how a Project rest was not given is learned about, while rest
+	// runs (#548). Nil is rest with no lookup at all, which answers such a
+	// name 404 as #547 shipped it.
+	admitter Admitter
 	// miniship: the limits every table read is held to (#549).
 	bounds QueryBounds
 }
@@ -55,6 +61,7 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		roles:    deps.Roles,
 		reader:   deps.Reader,
 		registry: deps.AdapterRegistry,
+		admitter: deps.Admitter,
 		bounds:   deps.Bounds.withDefaults(),
 	}
 }
@@ -77,10 +84,13 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	table := vars["table"]
 
 	// miniship: a database rest was not given is not found, as a route rest
-	// does not have is not found. Upstream answers 400.
-	roles, reader, err := h.databaseInPath(database)
+	// does not have is not found. Upstream answers 400. A Project rest has
+	// simply not seen yet is looked up here, once, and then it is a Database
+	// rest was given (#548).
+	roles, reader, err := h.databaseInPath(r.Context(), database)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusNotFound)
+		status, message := admissionFailure(err)
+		jsonError(w, message, status)
 		return
 	}
 
@@ -238,12 +248,30 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	runQuery := reader.QueryAsRoleCtx
-	if countFirst {
-		runQuery = reader.QueryCountAsRoleCtx
+	read := func(reader adapters.RoleReader, role string) adapters.Scanner {
+		if countFirst {
+			return reader.QueryCountAsRoleCtx(ctx, role, sqlSelect, values...)
+		}
+		return reader.QueryAsRoleCtx(ctx, role, sqlSelect, values...)
 	}
-	sc := runQuery(ctx, role, sqlSelect, values...)
-	if err = sc.Err(); err != nil {
+
+	sc := read(reader, role)
+	// miniship (#548): the Database refusing rest's login, rather than
+	// refusing the read, is the one failure a fresh answer can fix — a
+	// credential that was rotated since rest was told it. It is worth exactly
+	// one fresh lookup: the gate refuses a second one made too soon after it,
+	// so a credential the answerer cannot fix is a failure and never a loop.
+	//
+	// Err is asked once for each read and its answer carried, because a
+	// Scanner is not promised to be asked twice.
+	err = sc.Err()
+	if err != nil && credentialWasRotated(err) {
+		if fresh, freshRole, ok := h.rotated(ctx, database); ok {
+			sc = read(fresh, freshRole)
+			err = sc.Err()
+		}
+	}
+	if err != nil {
 		// miniship (#549): the detail goes to the log, redacted, and never to
 		// the caller. #545 found upstream answering with the driver's own
 		// error, the Database's host and port included.
@@ -336,7 +364,13 @@ const timeLimitMessage = "the read ran past the time limit and was cancelled; as
 // the name, pg.single among them. pg.single is about that shape: it asks
 // whether the name is the one physical database this process connected to, and
 // a registry answers that question by alias instead.
-func (h *CRUDHandler) databaseInPath(database string) (adapters.AnonymousRoles, adapters.RoleReader, error) {
+//
+// A name with no adapter is a miss, and a miss is where rest learns about a
+// Project it was not given (#548): it asks the process holding the Database
+// plugin, once, for that Project alone. The registry is checked first and the
+// check is the whole of the second call's cost, so a Project's second and
+// later calls cause no lookup.
+func (h *CRUDHandler) databaseInPath(ctx context.Context, database string) (adapters.AnonymousRoles, adapters.RoleReader, error) {
 	if h.registry == nil {
 		if err := validateDatabase(database, h.db, h.singleDB); err != nil {
 			return nil, nil, err
@@ -345,8 +379,55 @@ func (h *CRUDHandler) databaseInPath(database string) (adapters.AnonymousRoles, 
 	}
 	adapter, err := h.registry.Get(database)
 	if err != nil {
-		return nil, nil, fmt.Errorf("database not registered: %v", database)
+		adapter, err = h.admit(ctx, database)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
+	return rolesOf(adapter)
+}
+
+// admit looks a Project up, when rest has an answerer to ask and the name is
+// one that could be a Project at all.
+//
+// The name is held to the path-segment rule before it is asked about, so what
+// reaches the answerer is a name and not whatever arrived in the first segment
+// of somebody's URL. Without an answerer this is #547's answer unchanged: a
+// Database rest was not given, and no connection.
+func (h *CRUDHandler) admit(ctx context.Context, database string) (adapters.Adapter, error) {
+	if h.admitter == nil || !ident.IsSafeSegment(database) {
+		return nil, admission.ErrNoSuchProject
+	}
+	return h.admitter.Admit(ctx, database)
+}
+
+// rotated asks for this Project once more and answers with the reader and the
+// role of the pool the fresh credential opened. ok is false when there is no
+// answerer, when it was asked too recently, or when what came back cannot be
+// read with — and the read then reports the failure it already had.
+func (h *CRUDHandler) rotated(ctx context.Context, database string) (adapters.RoleReader, string, bool) {
+	if h.admitter == nil {
+		return nil, "", false
+	}
+	adapter, err := h.admitter.Readmit(ctx, database)
+	if err != nil {
+		return nil, "", false
+	}
+	roles, reader, err := rolesOf(adapter)
+	if err != nil || reader == nil {
+		return nil, "", false
+	}
+	role, ok := anonymousRole(roles, database)
+	if !ok {
+		return nil, "", false
+	}
+	return reader, role, true
+}
+
+// rolesOf is the role an adapter's reads become and the reader that becomes
+// it. An adapter that can do neither leaves both nil, and the read then
+// refuses rather than reading as the login.
+func rolesOf(adapter adapters.Adapter) (adapters.AnonymousRoles, adapters.RoleReader, error) {
 	roles, _ := adapter.(adapters.AnonymousRoles)
 	reader, _ := adapter.(adapters.RoleReader)
 	return roles, reader, nil

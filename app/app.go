@@ -11,6 +11,7 @@ import (
 
 	"github.com/prest/prest/v2/adapters"
 	"github.com/prest/prest/v2/adapters/postgres"
+	"github.com/prest/prest/v2/admission"
 	"github.com/prest/prest/v2/config"
 	pctx "github.com/prest/prest/v2/context"
 	"github.com/prest/prest/v2/controllers"
@@ -101,6 +102,12 @@ func New(cfg *config.Prest) (*App, error) {
 
 	deps := controllers.NewDepsFromConfig(cfg)
 	deps.AdapterRegistry = registry // Inject registry into deps
+	// miniship: a Project rest was not given is learned about on a miss
+	// (miniship-cloud#548). No lookup address is rest as #547 shipped it: the
+	// Databases above, and a name that is not one of them refused.
+	if gate := admissionGate(cfg, registry); gate != nil {
+		deps.Admitter = gate
+	}
 	h := controllers.NewHandlers(deps, cfg)
 
 	plg := plugins.New(cfg)
@@ -131,6 +138,32 @@ func New(cfg *config.Prest) (*App, error) {
 		handler = otelhttp.NewHandler(handler, "prest")
 	}
 	return &App{Config: cfg, Handler: handler, Adapters: registry, pg: cfg.Adapter}, nil
+}
+
+// admissionGate is how rest learns about a Project it was not given, or nil
+// when it was given no address to ask at (miniship-cloud#548).
+//
+// The gate is given the same registry the configured Projects are in, so an
+// admitted Project is found by the same lookup as one rest started with and
+// its second call costs nothing; and the same adapter constructor, so it is
+// unconnected until the read that admitted it needs it, holds that one
+// Database alone, and can resolve no other.
+func admissionGate(cfg *config.Prest, registry adapters.Registry) *admission.Gate {
+	conf := cfg.Admission.WithDefaults()
+	if conf.URL == "" {
+		return nil
+	}
+	return admission.NewGate(
+		admission.NewHTTPAnswerer(conf.URL, conf.Token, conf.Timeout),
+		registry,
+		admission.Pool{
+			Open: func(dbConf config.DatabaseConf) (adapters.Adapter, error) {
+				return createAdapterForDatabase(cfg, &dbConf), nil
+			},
+			Close: postgres.Close,
+		},
+		conf, cfg,
+	)
 }
 
 func ensureSchemaMigrated(cfg *config.Prest) error {
