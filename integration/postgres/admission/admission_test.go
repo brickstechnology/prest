@@ -2,8 +2,10 @@ package admission_test
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,6 +225,75 @@ func TestAdmission_aCredentialTheAnswererCannotFixIsNotALoop(t *testing.T) {
 	}
 	require.Equal(t, 2, answers.asksFor(gamma.alias),
 		"six failing reads were six lookups, which is the loop this must not be")
+}
+
+// A read already running when a credential is replaced still finishes.
+//
+// The pool the rotation replaces is the one that read is holding. Closing it at
+// the moment of the swap turns a read that would have succeeded into
+// "sql: database is closed", so it is closed after a grace instead — rest's own
+// statement time limit, by which point a read still in flight has been
+// cancelled by its own bound.
+func TestAdmission_aReadInFlightSurvivesTheRotationUnderIt(t *testing.T) {
+	cfg, admin := needsPostgres(t)
+	answers := newAnswerer(t, cfg)
+	createProject(t, cfg, gamma)
+	answers.teach(cfg, gamma, gamma.password)
+	rest := restOverProjects(t, cfg, answers)
+
+	readsItsOwnRow(t, rest, gamma)
+
+	// Reads of gamma, running while the rotation happens under them. They are
+	// on the pool the rotation replaces, which is the whole point.
+	var wg sync.WaitGroup
+	failures := make(chan string, 32)
+	stop := make(chan struct{})
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				status, body := read(t, rest, gamma)
+				// A 200 is the answer, and a 502 is the Database refusing the
+				// stale credential or having hung up, which is this rotation's
+				// own doing and is what the fresh lookup then fixes. Anything
+				// else is rest having broken a read it was holding — a 500
+				// saying the role could not be entered in particular, which is
+				// what a connection dying under a read used to be reported as.
+				if status != http.StatusOK && status != http.StatusBadGateway &&
+					status != http.StatusServiceUnavailable {
+					failures <- fmt.Sprintf("%d: %s", status, body)
+					return
+				}
+				if strings.Contains(body, "database is closed") {
+					failures <- "a read was answered from a pool that had been closed underneath it"
+					return
+				}
+			}
+		}()
+	}
+
+	rotated := "gamma-login-rotated-under-a-read"
+	exec(t, admin, "ALTER ROLE "+gamma.login+" PASSWORD '"+rotated+"'")
+	answers.teach(cfg, gamma, rotated)
+	hangUpOn(t, admin, gamma)
+	time.Sleep(time.Second)
+	close(stop)
+	wg.Wait()
+	close(failures)
+
+	for why := range failures {
+		t.Fatalf("a read did not survive the rotation under it: %s", why)
+	}
+
+	// And the control: reads are answered again once the fresh credential is
+	// in, so the loop above was reading rather than erroring throughout.
+	readsItsOwnRow(t, rest, gamma)
 }
 
 // The shape the self-host install runs: rest is given no Project at all and

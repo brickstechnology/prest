@@ -81,6 +81,15 @@ func needsPostgres(t *testing.T) (*config.Prest, *sql.DB) {
 			20*time.Second, 100*time.Millisecond,
 			"a rest connection to %s outlived the subject that opened it", p.database)
 	}
+
+	// Cleared last, so what countsRan reports is this subject's own window.
+	// testify's poll goroutine outlives the assertion that started it by up to
+	// one tick, and the subject before this one had its admin connection closed
+	// by t.Cleanup in between — so a straggler of its own can record
+	// "sql: database is closed" after it has finished. The drain above has
+	// taken seconds by the time this line runs, which is far longer than that
+	// straggler lives.
+	whyTheCountFailed.Store(nil)
 	return cfg, admin
 }
 

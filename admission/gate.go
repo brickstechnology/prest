@@ -20,6 +20,9 @@ type Pool struct {
 	// Close discards a pool, which is what a credential that was rotated
 	// leaves behind.
 	Close func(adapters.Adapter)
+	// Grace is how long a pool that has been replaced is left alone before
+	// it is closed. See the Gate's own field.
+	Grace time.Duration
 }
 
 // Gate is the lookup, and the three things in front of it: the registry that
@@ -200,6 +203,15 @@ func (g *Gate) finished(e *entry, force bool, err error) {
 // open turns an answer into the Project's pool and keeps it. A Project being
 // admitted again — a credential that was rotated — has its old pool discarded,
 // so the connections opened with the credential that no longer works go.
+//
+// **The old pool is closed after a grace and not at once.** A read that was
+// already running when the swap happened is holding that adapter, and closing
+// its pool underneath it turns a read that would have succeeded into
+// "sql: database is closed". The grace is rest's own statement time limit
+// (#549), so a read still in flight after it has been cancelled by its own
+// bound and there is nothing left to break. A pool left open a little longer
+// costs at most maxopenconn connections that the Database has not hung up yet;
+// closing it early costs somebody's answer.
 func (g *Gate) open(project string, answer Answer, force bool) (adapters.Adapter, error) {
 	conf, err := g.conf(answer)
 	if err != nil {
@@ -217,7 +229,10 @@ func (g *Gate) open(project string, answer Answer, force bool) (adapters.Adapter
 		return nil, err
 	}
 	if stale != nil && g.pool.Close != nil {
-		g.pool.Close(stale)
+		go func(stale adapters.Adapter) {
+			time.Sleep(g.pool.Grace)
+			g.pool.Close(stale)
+		}(stale)
 	}
 	return adapter, nil
 }
