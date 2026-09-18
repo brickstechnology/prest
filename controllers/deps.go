@@ -51,6 +51,10 @@ type Deps struct {
 	// miniship: the limits a table read is held to. A zero value is the
 	// default, so a handler built without them is still bounded.
 	Bounds QueryBounds
+
+	// miniship (#548): how a Project rest was not given is learned about
+	// while rest runs. Nil is rest with no lookup, answering such a name 404.
+	Admitter Admitter
 }
 
 // NewDepsFromConfig builds handler dependencies from application config.

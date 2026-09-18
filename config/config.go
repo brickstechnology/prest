@@ -151,6 +151,10 @@ type Prest struct {
 	EnableDefaultJWT     bool
 	SingleDB             bool
 	Databases            []DatabaseConf
+	// miniship (#548): where rest asks about a Project it was not given.
+	// Empty is rest without a lookup: the Databases above, and a 404 for
+	// every other name.
+	Admission            AdmissionConf
 	HTTPSMode            bool
 	HTTPSCert            string
 	HTTPSKey             string
@@ -191,6 +195,8 @@ func Load() (*Prest, error) {
 	Parse(v, cfg, configPath)
 
 	parseDatabaseRegistry(v, cfg)
+	// miniship (#548): the Projects rest was not given, and where to ask.
+	parseAdmission(v, cfg)
 
 	ensureJWTConfig(cfg)
 	ensureQueriesPath(cfg)
@@ -410,6 +416,13 @@ func viperCfg() (*viper.Viper, string) {
 	v.SetDefault("pg.max_page_size", 5000)
 	v.SetDefault("pg.max_query_len", 16384)
 	v.SetDefault("pg.statement_timeout_ms", 30000)
+	// miniship (#548): the lookup on a miss. admission.go says where each of
+	// the three figures came from.
+	v.SetDefault("admission.url", "")
+	v.SetDefault("admission.key", "")
+	v.SetDefault("admission.timeout", DefaultAdmissionTimeout)
+	v.SetDefault("admission.window", DefaultAdmissionWindow)
+	v.SetDefault("admission.max_projects", DefaultAdmissionMaxProjects)
 	v.SetDefault("pg.single", true)
 	v.SetDefault("pg.cache", true)
 	// todo: replace this with prefer, will need to replace lib/pq

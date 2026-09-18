@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -206,13 +207,49 @@ func read(t *testing.T, server *httptest.Server, p project) (int, string) {
 
 // restBackends is how many of a Database's sessions are rest's, which is the
 // question a Project's operator asks of pg_stat_activity.
+//
+// miniship (#548): it answers **1** when the query could not run, and never 0.
+// Two reasons, and both were paid for.
+//
+// The first is that this is asked inside require.Never and require.Eventually,
+// which poll in a goroutine of their own. A require in one of those fails the
+// test from outside it, and once the subject has finished, testify turns that
+// into `panic: Fail in goroutine after ... has completed` — a red run whose
+// subject says PASS. It happened here, on a runner busy enough that the last
+// poll landed after t.Cleanup had closed this connection.
+//
+// The second is the one that matters more. Every assertion this feeds is an
+// absence — *no connection reached that Project* — and a query that did not run
+// answers 0 exactly like a Database nothing connected to. So a failure answers
+// the number that fails both shapes: `> 0` is true, so Never fails, and `== 0`
+// is false, so Eventually times out. Either way the run is red, and the error
+// is on the line below rather than swallowed.
 func restBackends(t *testing.T, admin *sql.DB, database string) int {
 	t.Helper()
 	var n int
-	require.NoError(t, admin.QueryRow(
+	if err := admin.QueryRow(
 		`SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND application_name = $2`,
-		database, postgres.ApplicationName).Scan(&n))
+		database, postgres.ApplicationName).Scan(&n); err != nil {
+		// Not through t: a t.Log from a polling goroutine that outlived the
+		// subject is the same panic as a t.Error from one. whyTheCountFailed
+		// carries it to a subject that is still running.
+		whyTheCountFailed.Store(&err)
+		return 1
+	}
 	return n
+}
+
+// whyTheCountFailed is the last failure of the two pg_stat_activity queries
+// above, kept off t for the reason restBackends gives. countsRan is asked after
+// a poll, by a subject that is still running, so a red says what went wrong
+// rather than only that a number was not the one expected.
+var whyTheCountFailed atomic.Pointer[error]
+
+func countsRan(t *testing.T) {
+	t.Helper()
+	if err := whyTheCountFailed.Swap(nil); err != nil {
+		t.Fatalf("this subject asked pg_stat_activity and it did not answer: %v", *err)
+	}
 }
 
 // A session of rest's, as the Database sees it. Every field moves when a
@@ -237,6 +274,12 @@ type session struct {
 // transactions in it**, so that counter moves on its own, roughly once a naptime.
 // It failed a run of this subject by exactly that. pg_stat_activity is scoped
 // to rest's own sessions, which is the claim being made.
+//
+// miniship (#548): it answers nil when the query could not run, for the reason
+// restBackends answers 1 — this is asked inside a poll, and the poll's
+// goroutine outlives the subject. nil is what fails the caller: idleSessions
+// keeps waiting on an empty answer and times out, and the direct comparison
+// below is against a list that has rows in it.
 func restSessions(t *testing.T, admin *sql.DB, database string) []session {
 	t.Helper()
 	rows, err := admin.Query(`
@@ -244,17 +287,26 @@ func restSessions(t *testing.T, admin *sql.DB, database string) []session {
 		FROM pg_stat_activity
 		WHERE datname = $1 AND application_name = $2
 		ORDER BY pid`, database, postgres.ApplicationName)
-	require.NoError(t, err)
+	if err != nil {
+		whyTheCountFailed.Store(&err)
+		return nil
+	}
 	defer rows.Close()
 
 	var out []session
 	for rows.Next() {
 		var s session
-		require.NoError(t, rows.Scan(
-			&s.pid, &s.backendStart, &s.state, &s.query, &s.queryStart, &s.stateChange))
+		if err := rows.Scan(
+			&s.pid, &s.backendStart, &s.state, &s.query, &s.queryStart, &s.stateChange); err != nil {
+			whyTheCountFailed.Store(&err)
+			return nil
+		}
 		out = append(out, s)
 	}
-	require.NoError(t, rows.Err())
+	if err := rows.Err(); err != nil {
+		whyTheCountFailed.Store(&err)
+		return nil
+	}
 	return out
 }
 
@@ -331,6 +383,9 @@ func TestRest_aProjectNobodyCallsRecordsNoConnection(t *testing.T) {
 		return restBackends(t, admin, alpha.database)+restBackends(t, admin, gamma.database) > 0
 	}, idleWindow, 250*time.Millisecond,
 		"reading beta connected to a Project nobody called")
+	// The window above is an absence, so it is only worth something if the
+	// question was actually asked throughout it.
+	countsRan(t)
 }
 
 // After a Project's last call, nothing runs on its connections until the next
@@ -357,6 +412,7 @@ func TestRest_afterTheLastCallNothingRunsOnThatDatabase(t *testing.T) {
 	after := idleSessions(t, admin, beta.database)
 	require.NotEqual(t, before, after,
 		"the fields this subject watched never move, so it proved nothing")
+	countsRan(t)
 }
 
 // A Database can tell which of its sessions are rest's.
