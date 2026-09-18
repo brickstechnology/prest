@@ -231,6 +231,23 @@ you mean the files, and the directory only when the patch owns all of it.
     `controllers/crud.go`, `controllers/deps.go`, `app/app.go`,
     `app/admission_test.go`, `integration/postgres/admission/`,
     `.github/workflows/miniship.yml`
+17. **A read holding a pool outlives the credential under it** — three things a
+    rotation broke, each found by a subject that ran reads while one happened.
+    The replaced pool was closed at the moment of the swap, under reads that
+    were holding it, so a read that would have succeeded answered
+    `sql: database is closed`; it is closed after a grace now, the 30s time
+    limit a read is already given (#549), by which point a read still in flight
+    has been cancelled by its own bound. And two answers named the wrong half
+    of the system: a connection that went away during `SET LOCAL ROLE` was
+    reported as the role not being enterable, which sends an operator to read
+    the grants, and a `Database` refusing `rest`'s own login answered **400**,
+    which tells a browser its request was wrong when nothing about it was. Both
+    are the `Database` not being readable — 502 — and #549's `readFailure`
+    already knew that; it only had to be given the error.
+    Paths: `admission/gate.go`, `app/app.go`, `controllers/crud.go`,
+    `adapters/postgres/anonymous_role.go`,
+    `integration/postgres/admission/admission_test.go`,
+    `integration/postgres/twoprojects/two_projects_test.go`
 
 ## Taking an upstream fix
 

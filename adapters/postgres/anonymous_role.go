@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -100,7 +101,18 @@ func (p *postgres) asRole(ctx context.Context, role string, read func(*sql.Stmt)
 
 	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE "+pq.QuoteIdentifier(role)); err != nil {
 		slog.Error("could not become the anonymous role", "role", role, "err", logsafe.Error(err))
-		return &scanner.PrestScanner{Error: fmt.Errorf("%w: %s", adapters.ErrRoleNotEntered, role)}
+		// miniship (#548): only when Postgres itself refused the role. A
+		// statement can also fail here because the connection went away
+		// underneath it — a Database restarting, a session terminated, a
+		// credential replaced — and reporting that as a role failure sends an
+		// operator to read the grants, which is the wrong half of the system.
+		// #549's readFailure knows what a dead connection is; it only needs to
+		// be given the error rather than this one.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) {
+			return &scanner.PrestScanner{Error: fmt.Errorf("%w: %s", adapters.ErrRoleNotEntered, role)}
+		}
+		return &scanner.PrestScanner{Error: err}
 	}
 
 	stmt, err := p.PrepareTxContext(ctx, tx, SQL)

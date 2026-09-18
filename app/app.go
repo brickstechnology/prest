@@ -161,6 +161,11 @@ func admissionGate(cfg *config.Prest, registry adapters.Registry) *admission.Gat
 				return createAdapterForDatabase(cfg, &dbConf), nil
 			},
 			Close: postgres.Close,
+			// A pool replaced by a fresh credential is left alone for the
+			// time limit a read is given (#549), so a read that was already
+			// running on it has been cancelled by its own bound before it is
+			// closed underneath.
+			Grace: time.Duration(cfg.PGStatementTimeoutMS) * time.Millisecond,
 		},
 		conf, cfg,
 	)
