@@ -135,6 +135,11 @@ type Prest struct {
 	JWTWellKnownURL      string
 	JWTJWKS              string
 	JWTWhiteList         []string
+	// miniship (miniship-cloud#801): the claim a verified token names its
+	// role in. Set, rest checks a token when one is sent and becomes that
+	// role; no token is the Database's anonymous role, and a token that
+	// fails is refused. Empty is upstream's check, or none.
+	JWTRoleClaim         string
 	JSONAggType          string
 	MigrationsPath       string
 	QueriesPath          string
@@ -511,6 +516,7 @@ func Parse(v *viper.Viper, cfg *Prest, configPath string) {
 	cfg.JWTWellKnownURL = v.GetString("jwt.wellknownurl")
 	cfg.JWTJWKS = v.GetString("jwt.jwks")
 	cfg.JWTWhiteList = v.GetStringSlice("jwt.whitelist")
+	cfg.JWTRoleClaim = v.GetString("jwt.role_claim")
 	fetchJWKS(cfg)
 
 	cfg.JSONAggType = getJSONAgg(v)
