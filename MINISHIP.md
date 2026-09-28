@@ -256,6 +256,31 @@ you mean the files, and the directory only when the patch owns all of it.
     `config/admission_test.go`,
     `integration/postgres/admission/admission_test.go`,
     `integration/postgres/twoprojects/two_projects_test.go`
+18. **A verified token becomes the role it names** — miniship-cloud's ADR 0030
+    has `rest` do what PostgREST does. A token that verifies against the
+    install's JWKS makes the read that token's role, which is `service_role`
+    for the install's api service token. A request with no `Authorization`
+    stays its `Database`'s anonymous role. Anything else in `Authorization` is
+    refused with 401 and a Bearer challenge, before any `Database` is asked
+    about.
+    Upstream's `JwtMiddleware` does not do this. It verifies ES256 against a
+    JWKS, but it refuses a request that has no token, and it throws the
+    token's claims away. miniship-cloud#801's thread has the measurement.
+    `jwt.role_claim` (`PREST_JWT_ROLE_CLAIM`) switches on
+    `middlewares/token_role.go` in upstream's place. It needs an asymmetric
+    `jwt.algo` and a JWKS. `Debug` does not switch it off. A token also needs
+    an expiry and a role. An answer read as a token's role is never written to
+    the response cache.
+    The lookup on a miss changes too. It sends the install's api secret key in
+    `apikey` to the gateway's service listener, which swaps it for the api
+    service token. Patch 16's HS256 service token, `admission/assertion.go`,
+    is gone.
+    Paths: `context/token_role.go`, `middlewares/token_role.go`,
+    `middlewares/token_role_test.go`, `middlewares/config.go`,
+    `config/config.go`, `config/admission.go`, `controllers/crud.go`,
+    `controllers/crud_token_role_test.go`, `admission/admission.go`,
+    `app/admission_test.go`, `integration/postgres/admission/`,
+    `integration/postgres/anonymousrole/token_role_test.go`
 
 ## Taking an upstream fix
 

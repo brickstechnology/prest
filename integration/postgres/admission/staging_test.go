@@ -3,7 +3,6 @@ package admission_test
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,10 +51,10 @@ var (
 	atStart = []project{alpha, beta}
 )
 
-// theLookupKey is the derived key for the lookup route, base64url, as the api
-// hands it to rest. What travels is a service token minted with it.
-var theLookupKey = base64.RawURLEncoding.EncodeToString(
-	[]byte("a thirty-two byte key for a route"[:32]))
+// theAPISecretKey is the install's api secret key, as rest is handed it
+// (miniship-cloud#801). rest sends it in apikey to the gateway's service
+// listener; the answerer here stands where that listener is.
+const theAPISecretKey = "ms_secret_an-install-s-api-secret-key-for-the-test"
 
 var (
 	stageOnce sync.Once
@@ -209,7 +208,7 @@ func (a *answerer) serve(w http.ResponseWriter, r *http.Request) {
 
 	// The internal credential, checked before anything is answered. A caller
 	// with none learns nothing about any Project.
-	if refuse || !heldUp(r.Header.Get(admission.InternalClientHeader)) {
+	if refuse || !heldUp(r.Header) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -308,7 +307,7 @@ func restGiven(t *testing.T, cfg *config.Prest, answers *answerer, given []proje
 	}
 	conf.Admission = config.AdmissionConf{
 		URL:         answers.server.URL,
-		Key:         theLookupKey,
+		Key:         theAPISecretKey,
 		Timeout:     2 * time.Second,
 		Window:      2 * time.Second,
 		MaxProjects: 4000,

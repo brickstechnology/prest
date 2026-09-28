@@ -18,9 +18,6 @@ package app_test
 // rotation.
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,48 +34,14 @@ import (
 	"github.com/prest/prest/v2/config"
 )
 
-// theLookupKey is the derived key for the lookup route, as the api hands it to
-// rest: base64url, and never the install's root. rest mints a service token
-// with it on every call, so what travels is the token and not this.
-var theLookupKey = base64.RawURLEncoding.EncodeToString([]byte(
-	"a thirty-two byte key for a route"[:32]))
+// theAPISecretKey is the install's api secret key, as rest is handed it
+// (miniship-cloud#801): opaque, never a JWT, prefixed ms_secret_. rest sends
+// it in apikey to the gateway's service listener, and the gateway swaps it for
+// the api service token before the lookup route sees the call.
+const theAPISecretKey = "ms_secret_an-install-s-api-secret-key-for-the-test"
 
-// heldUp is checkAssertion's question, asked here in Go: does the thing rest
-// put in the header verify with the route's key, is it for this route, and
-// does it say rest sent it. The MAC is checked before anything is parsed, as
-// the api's own verifier does it (RFC 8725 §3.1).
-func heldUp(t *testing.T, offered string) {
-	t.Helper()
-	parts := strings.Split(offered, ".")
-	require.Len(t, parts, 3, "what rest sent is not a service token")
-
-	key, err := base64.RawURLEncoding.DecodeString(theLookupKey)
-	require.NoError(t, err)
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	require.Equal(t, base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), parts[2],
-		"the service token does not verify with the route's key")
-
-	var head struct{ Alg, Typ string }
-	var body struct {
-		Sub, Aud string
-		Exp, Iat int64
-		Jti      string
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(raw, &head))
-	raw, err = base64.RawURLEncoding.DecodeString(parts[1])
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(raw, &body))
-
-	require.Equal(t, "HS256", head.Alg)
-	require.Equal(t, "miniship-link+jwt", head.Typ)
-	require.Equal(t, "database", body.Aud, "the token is aimed at another route")
-	require.Equal(t, "rest", body.Sub)
-	require.NotEmpty(t, body.Jti)
-	require.Equal(t, int64(300), body.Exp-body.Iat, "five minutes, and no longer")
-}
+// retiredHeader is the header rest presented a service token in before #801.
+const retiredHeader = "x-miniship-api-client"
 
 // answerer stands where the process holding the Database plugin is: an HTTP
 // server that records every lookup it was asked for, the credential it was
@@ -89,6 +52,7 @@ type answerer struct {
 	mu          sync.Mutex
 	asked       []string
 	credentials []string
+	retired     []string
 	answers     map[string]admission.Answer
 	hold        chan struct{}
 }
@@ -105,7 +69,8 @@ func (a *answerer) serve(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimPrefix(r.URL.Path, "/")
 	a.mu.Lock()
 	a.asked = append(a.asked, project)
-	a.credentials = append(a.credentials, r.Header.Get(admission.InternalClientHeader))
+	a.credentials = append(a.credentials, r.Header.Get("apikey"))
+	a.retired = append(a.retired, r.Header.Get(retiredHeader))
 	answer, known := a.answers[project]
 	hold := a.hold
 	a.mu.Unlock()
@@ -299,10 +264,12 @@ func TestAdmission_withTheAnswererDown_warmProjectsAnswerAndAColdOneIsRefused(t 
 	}
 }
 
-// The lookup carries the internal credential, and an answerer that refuses the
-// caller it came from admits nothing: rest reports a Project it could not find
-// out about, never a Project that is not there.
-func TestAdmission_theLookupCarriesTheInternalCredential(t *testing.T) {
+// The lookup carries the api secret key in apikey, as every other service of
+// the install calls the gateway's service listener (#801), and nothing in the
+// header the retired service token travelled in. An answerer that refuses the
+// caller admits nothing: rest reports a Project it could not find out about,
+// never a Project that is not there.
+func TestAdmission_theLookupCarriesTheAPISecretKey(t *testing.T) {
 	answers := newAnswerer(t)
 	unseen := newCountingDatabase(t)
 	answers.put(projectC, unseen, "not-a-real-password")
@@ -312,11 +279,10 @@ func TestAdmission_theLookupCarriesTheInternalCredential(t *testing.T) {
 
 	answers.mu.Lock()
 	sent := append([]string(nil), answers.credentials...)
+	retired := append([]string(nil), answers.retired...)
 	answers.mu.Unlock()
-	require.Len(t, sent, 1, "the lookup went without a credential")
-	heldUp(t, sent[0])
-	require.NotContains(t, sent[0], theLookupKey,
-		"the route's key itself travelled, which is the thing a service token replaces")
+	require.Equal(t, []string{theAPISecretKey}, sent, "the lookup did not carry the api secret key in apikey")
+	require.Equal(t, []string{""}, retired, "the lookup still sent the retired header")
 
 	// And an answerer that refuses it is not a Project that does not exist.
 	refusing := newAnswerer(t)
@@ -367,7 +333,7 @@ func restWithAnswerer(t *testing.T, answers *answerer, given map[string]*countin
 		AccessConf:    config.AccessConf{Restrict: false},
 		Admission: config.AdmissionConf{
 			URL:         answers.server.URL,
-			Key:         theLookupKey,
+			Key:         theAPISecretKey,
 			Timeout:     2 * time.Second,
 			Window:      150 * time.Millisecond,
 			MaxProjects: 4000,

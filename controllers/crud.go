@@ -138,7 +138,9 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 
 	// miniship: the role, before anything is built. There is no default, and
 	// it is this Database's own: the adapter chosen above answers for it.
-	role, ok := anonymousRole(roles, database)
+	// A verified token names another one (#801, ADR 0030), and the read then
+	// becomes that; Postgres decides whether rest's login may.
+	role, ok := readRole(r.Context(), roles, database)
 	if !ok || reader == nil {
 		jsonError(w, adapters.ErrNoAnonymousRole.Error(), http.StatusInternalServerError)
 		return
@@ -291,7 +293,11 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == "GET" && h.cache != nil {
+	// miniship (#801): an answer read as a token's role is that caller's
+	// alone. The cache is keyed by the request, so writing it would answer an
+	// anonymous caller's identical request with rows its role cannot read.
+	_, asToken := pctx.TokenRole(r.Context())
+	if r.Method == "GET" && h.cache != nil && !asToken {
 		h.cache.BuntSet(middlewares.CacheKey(asAsked), string(sc.Bytes()))
 	}
 	//nolint
@@ -431,7 +437,7 @@ func (h *CRUDHandler) rotated(ctx context.Context, database string) (adapters.Ro
 	if reader == nil {
 		return nil, "", false
 	}
-	role, ok := anonymousRole(roles, database)
+	role, ok := readRole(ctx, roles, database)
 	if !ok {
 		return nil, "", false
 	}
@@ -460,6 +466,15 @@ func (h *CRUDHandler) builderFor(adapter adapters.Adapter) adapters.SQLBuilder {
 		return builder
 	}
 	return h.sql
+}
+
+// readRole is the role this read becomes: the one a verified token named, or
+// else the Database's anonymous role (miniship-cloud#801).
+func readRole(ctx context.Context, roles adapters.AnonymousRoles, database string) (string, bool) {
+	if role, ok := pctx.TokenRole(ctx); ok {
+		return role, true
+	}
+	return anonymousRole(roles, database)
 }
 
 // anonymousRole returns the role reads of database become.

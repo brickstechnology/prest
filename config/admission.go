@@ -17,12 +17,13 @@ import (
 // start-up, and a 404 for every other name. That is the shape #546 and #547
 // shipped, and every test of theirs still describes it.
 type AdmissionConf struct {
-	// URL is the address of the process holding the Database plugin. It is
-	// inside the install and is not reachable through the gateway.
+	// URL is where the lookup is asked: the gateway's service listener, which
+	// is inside the install, in front of the process holding the Database
+	// plugin (miniship-cloud#801).
 	URL string `mapstructure:"url"`
-	// Key is the derived key for the lookup route, base64url, which rest
-	// mints a short-lived service token with on every call. It is never the
-	// install's root secret, and it is never sent.
+	// Key is the install's api secret key, which rest sends in apikey to that
+	// listener. The gateway swaps it for the api service token, so the key
+	// travels no further than the gateway (miniship-cloud#801).
 	Key string `mapstructure:"key"`
 	// Timeout is how long rest waits for one answer.
 	Timeout time.Duration `mapstructure:"timeout"`
