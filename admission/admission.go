@@ -37,10 +37,11 @@ import (
 	"time"
 )
 
-// InternalClientHeader is the header rest presents the internal credential in.
-// The spelling is the one public #472 settled for a caller inside the install,
-// and the lookup address answers no caller without it.
-const InternalClientHeader = "x-miniship-api-client"
+// APIKeyHeader is the header rest presents the install's api secret key in
+// (miniship-cloud#801). It is Supabase's spelling, and the gateway's service
+// listener matches it, swaps it for the api service token and hands the lookup
+// route that token; the key itself goes no further than the gateway.
+const APIKeyHeader = "apikey"
 
 // Answer is what a lookup answers with, and it is the contract: the cloud half
 // (miniship-cloud#552) implements the process that produces one, and rest
@@ -90,12 +91,13 @@ type HTTPAnswerer struct {
 	base   string
 	key    string
 	client *http.Client
-	now    func() time.Time
 }
 
-// NewHTTPAnswerer asks base for one Project at a time, proving itself with a
-// service token minted from key — the derived key for the lookup route, never
-// the install's root. assertion.go says what one of those is.
+// NewHTTPAnswerer asks base for one Project at a time, proving itself with
+// key, the install's api secret key (miniship-cloud#801). base is the
+// gateway's service listener, which is inside the install and is the one
+// address that accepts the key: the lookup route itself accepts only the api
+// service token the gateway swaps it for.
 //
 // The client follows no redirect: a redirect is another address, and rest's
 // credential goes to the one address an operator configured and to no address
@@ -105,7 +107,6 @@ func NewHTTPAnswerer(base, key string, timeout time.Duration) *HTTPAnswerer {
 	return &HTTPAnswerer{
 		base: strings.TrimRight(base, "/"),
 		key:  key,
-		now:  time.Now,
 		client: &http.Client{
 			Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -117,16 +118,15 @@ func NewHTTPAnswerer(base, key string, timeout time.Duration) *HTTPAnswerer {
 
 // Lookup asks for project alone.
 func (a *HTTPAnswerer) Lookup(ctx context.Context, project string) (Answer, error) {
-	assertion, err := mintAssertion(a.key, a.now())
-	if err != nil {
-		return Answer{}, fmt.Errorf("%w: rest cannot prove itself at the lookup address", ErrUnavailable)
+	if a.key == "" {
+		return Answer{}, fmt.Errorf("%w: rest was given no api secret key for the lookup address", ErrUnavailable)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		a.base+"/"+url.PathEscape(project), nil)
 	if err != nil {
 		return Answer{}, fmt.Errorf("%w: %s", ErrUnavailable, "the lookup address is not an address")
 	}
-	req.Header.Set(InternalClientHeader, assertion)
+	req.Header.Set(APIKeyHeader, a.key)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.client.Do(req)

@@ -31,7 +31,18 @@ func New(cfg *config.Prest) *negroni.Negroni {
 				AllowCredentials: cfg.CORSAllowCredentials,
 			}))
 	}
-	if !cfg.Debug && cfg.EnableDefaultJWT {
+	if cfg.JWTRoleClaim != "" {
+		// miniship (miniship-cloud#801): a token names the role a read
+		// becomes, and no token is the anonymous role. token_role.go says why
+		// this replaces upstream's check rather than sitting beside it, and
+		// why Debug does not turn it off.
+		tokenRole, err := TokenRole(cfg.JWTRoleClaim, cfg.JWTJWKS, cfg.JWTAlgo)
+		if err != nil {
+			stack = append(stack, invalidJWTConfigMiddleware(err))
+		} else {
+			stack = append(stack, tokenRole)
+		}
+	} else if !cfg.Debug && cfg.EnableDefaultJWT {
 		jwtMiddleware, err := JwtMiddleware(
 			cfg.JWTKey, cfg.JWTJWKS, cfg.JWTAlgo, cfg.JWTWhiteList)
 		if err != nil {
