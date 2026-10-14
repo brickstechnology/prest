@@ -335,6 +335,43 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_embed_test.go`,
     `MINISHIP.md`
 
+21. **The Supabase SDK's writes, on `/rest/v1/{table}`** — miniship-cloud#1303,
+    public ADR 0077. `POST`, `PATCH` and `DELETE` on the address patch 19
+    reads, in PostgREST v12's language and statuses, which the SDK at 2.117.3
+    expects. `POST` inserts an object or an array of objects (201);
+    `Prefer: resolution=merge-duplicates` upserts, on `on_conflict` or the
+    primary key (200 when no row was new, as v12), and `ignore-duplicates`
+    leaves a conflicting row. `columns` names the columns of a bulk body, and
+    `missing=default` gives the columns their defaults where a row omits the
+    key. `PATCH` sets the columns of its object on the rows the filters match.
+    `DELETE` removes them. `return=representation` brings the changed rows
+    back in the columns `select` names (201 for an insert, 200 for the others);
+    without it nothing comes back (204 for `PATCH` and `DELETE`). `count=`
+    answers `Content-Range`; a single-object `Accept` holds the write to one
+    row; `tx=rollback` and `handling=strict` with `max-affected` are answered.
+    A write runs as its caller's role with its claims, in one read-write
+    transaction that commits only on success (`adapters.CallerWriter`), so a
+    refusal leaves no partial change. Values are read by `json_to_recordset`
+    against the column types the catalog reports; nothing of a body is SQL.
+    An update or a delete that names no filter is refused, 400 and `21000`
+    "requires a WHERE clause", as pg-safeupdate refuses it under Supabase.
+    A refusal of the Database is passed on with its own message, SQLSTATE,
+    details and hint and the status PostgREST maps the SQLSTATE to; the
+    Database itself withholds a row's details from a role row security binds.
+    **The row quota** is the read's page, `PG_MAX_PAGE_SIZE` (5,000 by
+    default): a body of more rows is refused before the Database is asked,
+    and a statement that changes more rows is rolled back, either way whole
+    (400, `MS104`). A body longer than 8 MiB is refused (413, `MS105`). The
+    time limit is the read's. `limit` and `offset` on a write, and embedded
+    tables in its `select`, are refused by name. The route table gains one
+    route, and `router/surface_test.go` with it.
+    Paths: `adapters/caller_write.go`, `adapters/postgres/caller_write.go`,
+    `controllers/postgrest_mutation.go`, `controllers/postgrest_write.go`,
+    `controllers/query_screen.go`, `router/router.go`,
+    `router/surface_test.go`,
+    `integration/postgres/anonymousrole/postgrest_read_test.go`,
+    `integration/postgres/anonymousrole/postgrest_write_test.go`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

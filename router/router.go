@@ -17,8 +17,9 @@ import (
 
 // RegisterRoutes wires HTTP routes onto the given router.
 //
-// miniship: rest answers three routes: the table read, the SDK's read on
-// /rest/v1/{table} (miniship-cloud#1302), and the health address.
+// miniship: rest answers four routes: the table read, the SDK's read and its
+// writes on /rest/v1/{table} (miniship-cloud#1302, #1303), and the health
+// address.
 // pREST v2.4.2 registers 26 here: the database, schema and table listings, the
 // stored-query runner and its registry, Go plugins, the sign-in route, the MCP
 // door, Studio, readiness, the table description, the batch insert and every
@@ -56,6 +57,9 @@ func RegisterRoutes(
 	// called rest. It carries the CRUD stack's middlewares as the table read
 	// does, for the same reasons.
 	router.Handle("/rest/v1/{table}", crudRoute(crudStack, h.CRUD.PostgRESTRead)).Methods("GET", "HEAD")
+	// miniship-cloud#1303: the same address writes, as its caller, under the
+	// row rules, in one transaction.
+	router.Handle("/rest/v1/{table}", crudRoute(crudStack, h.CRUD.PostgRESTWrite)).Methods("POST", "PATCH", "DELETE")
 	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Select)).Methods("GET")
 }
 
