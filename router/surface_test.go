@@ -2,7 +2,7 @@ package router_test
 
 // rest's surface. pREST v2.4.2 registers 26 routes in RegisterRoutes; rest
 // keeps the table read and the health address, adds the Supabase SDK's read and
-// writes on /rest/v1/{table} (miniship-cloud#1302, #1303), and nothing else, because it is the
+// writes on /rest/v1/{table} (miniship-cloud#1302, #1303) and its function calls on /rest/v1/rpc/{function} (#1304), and nothing else, because it is the
 // one door of miniship the internet reaches directly. app/surface_test.go
 // sends a request of every removed shape through the composed stack.
 
@@ -28,6 +28,7 @@ var keptRoutes = []string{
 	"GET /_health",
 	"GET /{database}/{schema}/{table}",
 	"GET,HEAD /rest/v1/{table}",
+	"GET,HEAD,POST,PUT,PATCH,DELETE /rest/v1/rpc/{function}",
 	"POST,PATCH,DELETE /rest/v1/{table}",
 }
 

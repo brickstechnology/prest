@@ -373,6 +373,71 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_read_test.go`,
     `integration/postgres/anonymousrole/postgrest_write_test.go`
 
+22. **The Supabase SDK's rpc(), on `/rest/v1/rpc/{function}`** —
+    miniship-cloud#1304, public ADR 0077. `POST`, `GET` and `HEAD` call a
+    function of `public` as PostgREST v12.2.3 does, and `PUT`, `PATCH` and
+    `DELETE` are 405 `PGRST101` ("Cannot use the DELETE method on RPC",
+    Error.hs, `InvalidRpcMethod`). `POST` sends the arguments as one JSON
+    object; `GET` and `HEAD` send them as the query parameters that are not
+    filters, a value that begins with an operator (`gt.2`, `not.in.(1,2)`)
+    being a filter on the result and any other an argument (QueryParams.hs,
+    `parse` with `isRpcRead`). The Database is told the arguments by name
+    (`fn(a := 1)`, QueryBuilder.hs, `callPlanToQuery`), so one left out takes
+    its default, and the function runs once, in a CTE the page and the count
+    are read from (Statements.hs, `prepareCall`).
+    The overload is found as Plan.hs's `findProc` finds it, by the argument
+    names a call sends and not by their types: the names must cover every
+    required argument and may add optional ones and nothing else. None is 404
+    `PGRST202` with Error.hs's message, details and "Perhaps you meant to call
+    the function" hint (the closest name when none has the name asked for, the
+    closest argument list when one has, by edit distance where PostgREST uses a
+    fuzzy set); several is 300 `PGRST203`. `Prefer: params=single-object`, and
+    a body for a function of one unnamed json or jsonb argument, hand the
+    function the whole body; a `VARIADIC` argument takes a JSON array, or every
+    value of a repeated query parameter. The catalog query is SchemaCache.hs's
+    `funcsSqlQuery`, narrowed to one name in `public` and read in the call's own
+    transaction, once for each call and cached nowhere; where it zips
+    `proargnames` with `proargtypes`, which lists only the input arguments and
+    so misaligns an OUT argument before an IN one, this reads `proallargtypes`
+    and the modes. A function can be seen by any role and run only by one with
+    `EXECUTE`: a role without it is 42501, 401 for the anonymous role and 403
+    for another, as PostgREST gives it.
+    What comes back follows what the function returns (SqlFragment.hs, `asJsonF`;
+    Response.hs, `actionResponse`): a scalar is the JSON value, one row of a
+    table or of OUT arguments an object, a set an array of values or of objects,
+    and `void` is 204; a single-object `Accept` holds a set to one row. A set
+    takes the read's filters, order, `limit`, `offset` and `count`, and is cut at
+    the read's page (`PG_MAX_PAGE_SIZE`; a `limit` above it is `MS100`).
+    **`GET` and `HEAD` run in a read-only transaction**, which is how PostgREST
+    refuses a function that writes: Plan.hs gives every `InvRead` the read mode,
+    RpcSpec.hs ("only for GET rpc") expects 405 of a function that mutates, and
+    the Database answers 25006. A `VOLATILE` function that writes nothing is
+    answered on `GET`, as it is there. `POST` runs in a read-write transaction
+    that commits only on success, as the caller's role with its claims in
+    `request.jwt.claims`; `tx=rollback` and `handling=strict` with
+    `max-affected` are answered. A function's own error is passed on with its
+    message, SQLSTATE, details and hint and PostgREST's status for the SQLSTATE
+    (P0001 is 400), and a function that raises SQLSTATE `PTnnn` answers `nnn`
+    (Error.hs, `pgErrorStatus`).
+    **The write quota counts a function's writes.** For a `VOLATILE` function
+    called by `POST`, the rows the transaction has inserted, updated and deleted
+    (`pg_stat_xact_user_tables`, the Database's own per-transaction counters)
+    are read before the call and after it, and a call that changed more than the
+    read's page is rolled back whole and refused, 400 `MS104`. It counts work
+    done, so a row inserted and deleted by the same call counts twice, and it
+    sees only what the counters see: `TRUNCATE` is not counted, and the call has
+    run to its end before it is refused, within the time limit. Not answered,
+    and refused by name: an embedded table in a function's select, `columns`,
+    a body that is not JSON, any `Content-Type` but JSON, and a JSON array as
+    the arguments of a function that takes them by name. The route table gains
+    one route, and `router/surface_test.go` with it.
+    Paths: `controllers/postgrest_call.go`, `controllers/postgrest_call_test.go`,
+    `controllers/postgrest_routine.go`, `controllers/postgrest_query.go`,
+    `controllers/postgrest_write.go`, `router/router.go`,
+    `router/surface_test.go`,
+    `integration/postgres/anonymousrole/postgrest_call_test.go`,
+    `MINISHIP.md`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue
