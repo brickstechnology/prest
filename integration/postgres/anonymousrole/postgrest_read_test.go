@@ -374,11 +374,9 @@ func TestPostgREST_theBoundsAreRefusedInTheSDKsShape(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, status)
 	require.Equal(t, "42P01", refusal(body)["code"])
 
-	// A write, which this address does not take yet. Expected: 404.
-	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
-		status, _, _ = ask(t, rest, method, "/rest/v1/"+articles+"?id=eq.1", anon, nil)
-		require.Equal(t, http.StatusNotFound, status, method)
-	}
+	// A verb the SDK never sends. Expected: 404, as for any route rest lacks.
+	status, _, _ = ask(t, rest, http.MethodPut, "/rest/v1/"+articles+"?id=eq.1", anon, nil)
+	require.Equal(t, http.StatusNotFound, status)
 }
 
 func TestPostgREST_aSelfHostInstallServesItsOneProject(t *testing.T) {
