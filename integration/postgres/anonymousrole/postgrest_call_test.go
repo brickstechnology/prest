@@ -49,6 +49,7 @@ const shelf = "rest_pgc_shelf"
 //	rest_pgc_fail     () -> void                         raises
 //	rest_pgc_status   () -> void                         raises SQLSTATE PT418
 //	rest_pgc_secret   () -> text                         the reader may not run it
+//	rest_pgc_slow     () -> void                         sleeps for ten seconds
 func stageFunctions(t *testing.T, db *sql.DB) {
 	t.Helper()
 	stagePostgREST(t, db)
@@ -61,7 +62,7 @@ func stageFunctions(t *testing.T, db *sql.DB) {
 			public.rest_pgc_stamp(), public.rest_pgc_same(int), public.rest_pgc_same(bigint),
 			public.rest_pgc_both(int), public.rest_pgc_both(int, int), public.rest_pgc_echo(jsonb),
 			public.rest_pgc_unnamed(json), public.rest_pgc_sum(int[]), public.rest_pgc_whoami(),
-			public.rest_pgc_fail(), public.rest_pgc_status(), public.rest_pgc_secret();`, shelf)
+			public.rest_pgc_fail(), public.rest_pgc_status(), public.rest_pgc_secret(), public.rest_pgc_slow();`, shelf)
 	exec(t, db, drop)
 	t.Cleanup(func() { exec(t, db, drop) })
 	exec(t, db, fmt.Sprintf(`
@@ -106,6 +107,7 @@ func stageFunctions(t *testing.T, db *sql.DB) {
 			AS $$ BEGIN RAISE EXCEPTION 'no way' USING DETAIL = 'because', HINT = 'try again'; END $$;
 		CREATE FUNCTION public.rest_pgc_status() RETURNS void LANGUAGE plpgsql
 			AS $$ BEGIN RAISE EXCEPTION 'a teapot' USING ERRCODE = 'PT418'; END $$;
+		CREATE FUNCTION public.rest_pgc_slow() RETURNS void LANGUAGE sql AS $$ SELECT pg_sleep(10) $$;
 		CREATE FUNCTION public.rest_pgc_secret() RETURNS text LANGUAGE sql AS $$ SELECT 'secret' $$;
 		REVOKE EXECUTE ON FUNCTION public.rest_pgc_secret() FROM PUBLIC;
 		GRANT EXECUTE ON FUNCTION public.rest_pgc_secret() TO %[2]s, %[3]s;
@@ -474,6 +476,17 @@ func TestPostgRESTCall_theWritesOfAFunctionAreHeldToTheWriteQuota(t *testing.T) 
 	// A function that changes nothing is not counted.
 	status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgc_nums", f.a, nil, `{"n":2}`)
 	require.Equal(t, http.StatusOK, status, body)
+}
+
+func TestPostgRESTCall_aCallPastTheTimeLimitIsCancelled(t *testing.T) {
+	f := newCallFixture(t, func(c *config.Prest) { c.PGStatementTimeoutMS = 250 })
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		status, _, body := send(t, f.rest, method, "/rest/v1/rpc/rest_pgc_slow", f.a, nil, "")
+		require.Equal(t, http.StatusGatewayTimeout, status, "%s: %s", method, body)
+		refusal := refusalOf(t, body)
+		require.Equal(t, "57014", refusal["code"])
+		require.Equal(t, "the call ran past the time limit and was cancelled", refusal["message"])
+	}
 }
 
 func TestPostgRESTCall_otherMethodsAndShapesAreRefusedByName(t *testing.T) {
