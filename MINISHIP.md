@@ -336,7 +336,7 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_embed_test.go`,
     `MINISHIP.md`
 
-20. **The Supabase SDK's writes, on `/rest/v1/{table}`** — miniship-cloud#1303,
+21. **The Supabase SDK's writes, on `/rest/v1/{table}`** — miniship-cloud#1303,
     public ADR 0077. `POST`, `PATCH` and `DELETE` on the address patch 19
     reads, in PostgREST v12's language and statuses, which the SDK at 2.117.3
     expects. `POST` inserts an object or an array of objects (201);

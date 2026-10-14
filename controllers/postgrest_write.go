@@ -148,10 +148,15 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	selected, err := pgrWriteSelect(read.items)
+	if err != nil {
+		pgrWriteError(w, err)
+		return
+	}
 	m := &pgrMutation{
 		table:          table,
 		representation: prefer.representation,
-		selected:       read.columns,
+		selected:       selected,
 		order:          read.order,
 		quota:          h.bounds.MaxPageSize,
 		defaults:       prefer.missingDefault,
@@ -312,6 +317,25 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// pgrWriteSelect is the columns a write returns: plain names and `*`. An
+// embedded table, an alias, a cast and a JSON path in a write's select are
+// refused by name.
+func pgrWriteSelect(items []pgrItem) ([]string, error) {
+	var names []string
+	for _, item := range items {
+		field := item.field
+		if field == nil || field.alias != "" || field.cast != "" || len(field.col.steps) > 0 {
+			return nil, pgrRefuse("a write's select takes column names and * only")
+		}
+		if field.star {
+			names = append(names, "*")
+			continue
+		}
+		names = append(names, field.col.name)
+	}
+	return names, nil
 }
 
 // plan fills in what the catalog decides: the columns a body sets, and the
