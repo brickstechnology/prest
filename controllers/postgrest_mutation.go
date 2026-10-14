@@ -22,8 +22,8 @@ import (
 	"github.com/lib/pq"
 )
 
-// pgrColumn is one column of the table written, as the catalog reports it.
-type pgrColumn struct {
+// pgrTableColumn is one column of the table written, as the catalog reports it.
+type pgrTableColumn struct {
 	name string
 	// typ is format_type's spelling, the type json_to_recordset reads the
 	// column's value as.
@@ -35,7 +35,7 @@ type pgrColumn struct {
 
 // pgrLoadColumns asks the catalog for every column of the table, in order. A
 // table that is not there is 42P01, as a read of it is.
-func pgrLoadColumns(ctx context.Context, tx *sql.Tx, table string) ([]pgrColumn, error) {
+func pgrLoadColumns(ctx context.Context, tx *sql.Tx, table string) ([]pgrTableColumn, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT a.attname::text, format_type(a.atttypid, a.atttypmod),
 		       CASE WHEN a.attgenerated = '' THEN coalesce(pg_get_expr(d.adbin, d.adrelid), '') ELSE '' END
@@ -47,9 +47,9 @@ func pgrLoadColumns(ctx context.Context, tx *sql.Tx, table string) ([]pgrColumn,
 		return nil, err
 	}
 	defer rows.Close()
-	var columns []pgrColumn
+	var columns []pgrTableColumn
 	for rows.Next() {
-		var column pgrColumn
+		var column pgrTableColumn
 		if err := rows.Scan(&column.name, &column.typ, &column.def); err != nil {
 			return nil, err
 		}
@@ -175,13 +175,13 @@ func pgrWriteQuota(rows, quota int, subject string) error {
 
 // pgrSchemaColumn finds the column called name in the table, or says what
 // PostgREST says of a body that names one the table lacks.
-func pgrSchemaColumn(table string, columns []pgrColumn, name string) (pgrColumn, error) {
+func pgrSchemaColumn(table string, columns []pgrTableColumn, name string) (pgrTableColumn, error) {
 	for _, column := range columns {
 		if column.name == name {
 			return column, nil
 		}
 	}
-	return pgrColumn{}, &pgrError{
+	return pgrTableColumn{}, &pgrError{
 		status:  400,
 		code:    "PGRST204",
 		message: fmt.Sprintf("Could not find the '%s' column of '%s' in the schema cache", name, table),
@@ -202,9 +202,9 @@ const (
 type pgrMutation struct {
 	kind   pgrWriteKind
 	table  string
-	schema []pgrColumn
+	schema []pgrTableColumn
 	// written are the columns the body sets, in the order the body used them.
-	written []pgrColumn
+	written []pgrTableColumn
 	body    *pgrBody
 	// bodyArg is the placeholder number of the body, after the filters'.
 	bodyArg int
