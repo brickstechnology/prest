@@ -60,6 +60,9 @@ type pgrPrefer struct {
 	rollback       bool
 	strict         bool
 	maxAffected    int
+	// singleObject is `params=single-object`, which a function call reads
+	// (miniship-cloud#1304): the whole body is the function's one argument.
+	singleObject bool
 }
 
 // pgrParsePrefer reads every Prefer header. A preference rest does not know is
@@ -84,6 +87,8 @@ func pgrParsePrefer(values []string) pgrPrefer {
 				prefer.rollback = setting == "rollback"
 			case "handling":
 				prefer.strict = setting == "strict"
+			case "params":
+				prefer.singleObject = setting == "single-object"
 			case "max-affected":
 				if n, err := strconv.Atoi(setting); err == nil && n >= 0 {
 					prefer.maxAffected = n
@@ -479,6 +484,13 @@ func pgrDatabaseStatus(code, message string, authed bool) int {
 		return http.StatusServiceUnavailable
 	case code == "P0001":
 		return http.StatusBadRequest
+	case strings.HasPrefix(code, "PT"):
+		// A function raises its own status: SQLSTATE PT402 answers 402
+		// (Error.hs, pgErrorStatus).
+		if n, err := strconv.Atoi(code[2:]); err == nil && n >= 100 && n <= 599 {
+			return n
+		}
+		return http.StatusInternalServerError
 	case code == "42883", code == "42P01":
 		return http.StatusNotFound
 	case code == "42P17":
