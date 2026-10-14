@@ -418,7 +418,7 @@ func TestPostgRESTEmbed_anAliasACastAndAJSONPath(t *testing.T) {
 
 	// A cast is a type's name and nothing else, a path is words, and ->> ends one.
 	for _, query := range []string{
-		"select=pages::text;drop",
+		"select=pages::text%3Bdrop",
 		"select=pages::int)--",
 		"select=meta->>kind->x",
 		"select=meta->'kind'",
