@@ -139,7 +139,7 @@ func restForTheSDK(t *testing.T, cfg *config.Prest, install theInstall, pool pro
 		c.JWTRoleClaim = "role"
 		c.JWTAlgo = "ES256"
 		c.JWTJWKS = install.jwks
-		c.PostgREST = config.PostgRESTConf{ProjectHeader: projectHeader, ProjectKeysURL: pool.keysURL()}
+		c.PostgREST = config.PostgRESTConf{ProjectHeader: projectHeader, ProjectKeysTemplate: pool.keysURL()}
 	}}, with...)...)
 }
 
@@ -407,7 +407,7 @@ func TestPostgREST_aSelfHostInstallServesItsOneProject(t *testing.T) {
 		c.JWTAlgo = "ES256"
 		c.JWTJWKS = install.jwks
 		c.Admission = config.AdmissionConf{URL: answerer.URL + "/database", Key: "the api secret key"}
-		c.PostgREST = config.PostgRESTConf{ProjectKeysURL: pool.keysURL()}
+		c.PostgREST = config.PostgRESTConf{ProjectKeysTemplate: pool.keysURL()}
 	})
 
 	// A read with no Project named, twice, and a User's read.
