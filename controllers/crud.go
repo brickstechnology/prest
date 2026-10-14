@@ -42,6 +42,11 @@ type CRUDHandler struct {
 	admitter Admitter
 	// miniship: the limits every table read is held to (#549).
 	bounds QueryBounds
+	// miniship (#1302): the header a gateway names the Project in on the
+	// SDK's /rest/v1 address, read only when set, and how a User's token is
+	// checked against that Project's key set. Nil refuses every User's token.
+	projectHeader string
+	userTokens    UserTokenVerifier
 }
 
 // servedSchema is the one schema rest serves (miniship). A Project's own
@@ -63,6 +68,9 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		registry: deps.AdapterRegistry,
 		admitter: deps.Admitter,
 		bounds:   deps.Bounds.withDefaults(),
+
+		projectHeader: deps.ProjectHeader,
+		userTokens:    deps.UserTokens,
 	}
 }
 
