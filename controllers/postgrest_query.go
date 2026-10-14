@@ -4,9 +4,10 @@ package controllers
 // for a read, as the Supabase SDK's database client writes it. Reads only:
 // the columns named, the filters eq, neq, gt, gte, lt, lte, like, ilike, is,
 // in, each of them under not., an or=( … ) group, order, limit and offset.
-// Writes and function calls are their own tickets (#1303, #1304) and are
-// refused here, by name. A read that embeds another table, an alias, a cast and
-// a json path are answered (#1305): postgrest_select.go and postgrest_embed.go.
+// Writes and function calls are their own tickets and have their own files
+// (#1303 postgrest_write.go, #1304 postgrest_call.go), which parse their
+// filters here. A read that embeds another table, an alias, a cast and a json
+// path are answered (#1305): postgrest_select.go and postgrest_embed.go.
 //
 // Nothing the caller sent becomes SQL text but a name that passed pgrIdent and
 // was quoted: every value is a parameter. The parser is written against the
