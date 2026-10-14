@@ -37,6 +37,10 @@ type QueryBounds struct {
 	// bound anything: a query string is as long as the request line allows,
 	// and every filter in it is a predicate built and a parameter bound.
 	MaxQueryLen int
+	// MaxBodyLen is the largest body of a write rest will read, in bytes
+	// (miniship-cloud#1303). The row quota is MaxPageSize; this is what bounds
+	// the work done reading a body before the rows in it can be counted.
+	MaxBodyLen int
 }
 
 // The defaults, both taken from docs/research/QUERY-BOUNDS-AND-FAIRNESS.md and
@@ -47,6 +51,7 @@ type QueryBounds struct {
 const (
 	defaultMaxPageSize = 5000
 	defaultMaxQueryLen = 16384
+	defaultMaxBodyLen  = 8 << 20
 )
 
 // withDefaults returns b with every unset bound at its default.
@@ -56,6 +61,9 @@ func (b QueryBounds) withDefaults() QueryBounds {
 	}
 	if b.MaxQueryLen <= 0 {
 		b.MaxQueryLen = defaultMaxQueryLen
+	}
+	if b.MaxBodyLen <= 0 {
+		b.MaxBodyLen = defaultMaxBodyLen
 	}
 	return b
 }
