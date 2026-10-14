@@ -311,6 +311,30 @@ you mean the files, and the directory only when the patch owns all of it.
     `middlewares/token_role.go`, `projectkeys/`, `router/router.go`,
     `router/surface_test.go`,
     `integration/postgres/anonymousrole/postgrest_read_test.go`
+20. **The Supabase SDK's read brings related rows** — miniship-cloud#1305,
+    public ADR 0077: patch 19's read answers `select=*,other(*)` as PostgREST
+    v12 does. A table named in `select` is an object where the relationship is
+    many-to-one or one-to-one and an array where it is one-to-many or
+    many-to-many through a join table (one whose two keys are part of its
+    primary key); `alias:other(*)`, `other!fk_name(*)` (a constraint, a column
+    or the join table), `other!inner(*)` and nesting to five deep are read, and
+    the embedded table is filtered and ordered with `other.col=eq.1`,
+    `other.order`, `other.limit` and `other.offset`. The relationship is found by
+    PostgREST's own rules (`findRel`, Plan.hs at v12.2.3), from the foreign keys
+    of `public` read from the catalog in the read's own transaction, once for
+    each read that embeds and cached nowhere: none is `PGRST200` (400, with its
+    "Perhaps you meant" hint), more than one is `PGRST201` (300, the candidates
+    in `details`). Related rows are read by the caller's role in that
+    transaction, so a row its rules hide is absent and a table it holds no grant
+    on refuses the read. An embedded table's page is held to `MaxPageSize` as the
+    top one is. The select also reads `alias:column`, `column::type` and
+    `column->a->>b`, and a filter or an order may name a json path. A spread
+    (`...other(*)`) and aggregates are refused by name.
+    Paths: `controllers/postgrest_embed.go`, `controllers/postgrest_embed_test.go`,
+    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `controllers/postgrest_select.go`,
+    `integration/postgres/anonymousrole/postgrest_embed_test.go`,
+    `MINISHIP.md`
 
 20. **The Supabase SDK's writes, on `/rest/v1/{table}`** — miniship-cloud#1303,
     public ADR 0077. `POST`, `PATCH` and `DELETE` on the address patch 19
