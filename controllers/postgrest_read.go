@@ -110,15 +110,26 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 	var total int64
 	run := func(reader adapters.CallerReader) error {
 		return reader.ReadAsCallerCtx(ctx, caller, func(tx *sql.Tx) error {
+			// A retry builds the read again, so the arguments are the first
+			// attempt's only once.
+			again := *read
+			again.where, again.args = append([]string(nil), read.where...), append([]any(nil), read.args...)
+			if err := again.plan(ctx, tx, table); err != nil {
+				return err
+			}
+			rowsSQL, err := again.rowsSQL(table)
+			if err != nil {
+				return err
+			}
 			var out string
-			if err := tx.QueryRowContext(ctx, read.rowsSQL(table), read.args...).Scan(&out); err != nil {
+			if err := tx.QueryRowContext(ctx, rowsSQL, again.args...).Scan(&out); err != nil {
 				return err
 			}
 			if err := json.Unmarshal([]byte(out), &rows); err != nil {
 				return err
 			}
 			if counted {
-				return tx.QueryRowContext(ctx, read.countSQL(table), read.args...).Scan(&total)
+				return tx.QueryRowContext(ctx, again.countSQL(table), again.countArgs()...).Scan(&total)
 			}
 			return nil
 		})
@@ -312,10 +323,14 @@ func pgrWriteError(w http.ResponseWriter, err error) {
 		}
 		return s
 	}
+	details := nullable(refused.details)
+	if refused.detailsList != nil {
+		details = refused.detailsList
+	}
 	body, _ := json.Marshal(map[string]any{
 		"code":    refused.code,
 		"message": refused.message,
-		"details": nullable(refused.details),
+		"details": details,
 		"hint":    nullable(refused.hint),
 	})
 	w.Header().Set("Content-Type", pgrJSONMediaType)
