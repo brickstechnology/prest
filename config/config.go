@@ -155,7 +155,10 @@ type Prest struct {
 	// miniship (#548): where rest asks about a Project it was not given.
 	// Empty is rest without a lookup: the Databases above, and a 404 for
 	// every other name.
-	Admission            AdmissionConf
+	Admission AdmissionConf
+	// miniship (#1302): where the /rest/v1 address finds its Project and a
+	// User's key set.
+	PostgREST            PostgRESTConf
 	HTTPSMode            bool
 	HTTPSCert            string
 	HTTPSKey             string
@@ -200,6 +203,11 @@ func Load() (*Prest, error) {
 	}
 	// miniship (#548): the Projects rest was not given, and where to ask.
 	parseAdmission(v, cfg)
+	// miniship (#1302): the /rest/v1 address. A key-set address that names no
+	// Project is a configuration rest refuses to start on.
+	if err := parsePostgREST(v, cfg); err != nil {
+		return nil, err
+	}
 
 	ensureJWTConfig(cfg)
 	ensureQueriesPath(cfg)

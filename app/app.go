@@ -22,6 +22,7 @@ import (
 	"github.com/prest/prest/v2/internal/logsafe"
 	"github.com/prest/prest/v2/middlewares"
 	"github.com/prest/prest/v2/plugins"
+	"github.com/prest/prest/v2/projectkeys"
 	"github.com/prest/prest/v2/router"
 
 	"github.com/gorilla/mux"
@@ -117,6 +118,14 @@ func New(cfg *config.Prest) (*App, error) {
 	// Databases above, and a name that is not one of them refused.
 	if gate := admissionGate(cfg, registry); gate != nil {
 		deps.Admitter = gate
+	}
+	// miniship (#1302): the SDK's /rest/v1 address, which finds its Project
+	// in the gateway's header or asks for the install's one, and checks a
+	// User's token against that Project's key set.
+	deps.ProjectHeader = cfg.PostgREST.ProjectHeader
+	if cfg.PostgREST.ProjectKeysURL != "" {
+		conf := cfg.Admission.WithDefaults()
+		deps.UserTokens = projectkeys.New(cfg.PostgREST.ProjectKeysURLFor, conf.Timeout, conf.Window, conf.MaxProjects)
 	}
 	h := controllers.NewHandlers(deps, cfg)
 

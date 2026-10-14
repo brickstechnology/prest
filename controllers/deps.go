@@ -57,6 +57,12 @@ type Deps struct {
 	// miniship (#548): how a Project rest was not given is learned about
 	// while rest runs. Nil is rest with no lookup, answering such a name 404.
 	Admitter Admitter
+
+	// miniship (#1302): the SDK's /rest/v1 address. ProjectHeader is the
+	// header a gateway names the Project in, read only when set; UserTokens
+	// checks a User's token against that Project's key set.
+	ProjectHeader string
+	UserTokens    UserTokenVerifier
 }
 
 // NewDepsFromConfig builds handler dependencies from application config.

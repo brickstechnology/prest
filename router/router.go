@@ -17,7 +17,8 @@ import (
 
 // RegisterRoutes wires HTTP routes onto the given router.
 //
-// miniship: rest answers two routes, the table read and the health address.
+// miniship: rest answers three routes: the table read, the SDK's read on
+// /rest/v1/{table} (miniship-cloud#1302), and the health address.
 // pREST v2.4.2 registers 26 here: the database, schema and table listings, the
 // stored-query runner and its registry, Go plugins, the sign-in route, the MCP
 // door, Studio, readiness, the table description, the batch insert and every
@@ -49,6 +50,12 @@ func RegisterRoutes(
 	router.MethodNotAllowedHandler = http.NotFoundHandler()
 
 	router.HandleFunc("/_health", h.Health.Handler()).Methods("GET")
+	// miniship-cloud#1302: the Supabase SDK's database address, reads only,
+	// in PostgREST's language. Registered before the table read, whose
+	// /{database}/{schema}/{table} would otherwise match it as a Database
+	// called rest. It carries the CRUD stack's middlewares as the table read
+	// does, for the same reasons.
+	router.Handle("/rest/v1/{table}", crudRoute(crudStack, h.CRUD.PostgRESTRead)).Methods("GET", "HEAD")
 	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Select)).Methods("GET")
 }
 

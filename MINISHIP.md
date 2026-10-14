@@ -283,6 +283,35 @@ you mean the files, and the directory only when the patch owns all of it.
     `app/admission_test.go`, `integration/postgres/admission/`,
     `integration/postgres/anonymousrole/token_role_test.go`
 
+19. **The Supabase SDK's read, on `/rest/v1/{table}`** — miniship-cloud#1302,
+    public ADR 0077: the owner chose that the fork answers PostgREST's language
+    itself. `GET` and `HEAD` on `/rest/v1/{table}` read with the SDK's query
+    string (`select`, the filters `eq` to `in` and `not.` of each, `or` and
+    `and` groups, `order`, `limit`, `offset`), the single-object `Accept`, a
+    count in `Prefer` with its `Content-Range`, and `Accept-Profile` held to
+    `public`. Writes, function calls and embedded reads are refused by name;
+    they are #1303 to #1305. The path names no Project: `PROJECT_HEADER` names
+    the header a gateway hands it in, read only when set, and with none the
+    lookup is asked for the install's one Project, at its address with no name.
+    A User's token is carried past patch 18's check on this address alone and
+    verified in the handler against the key set the auth api publishes for that
+    Project, read from `PROJECT_KEYS_URL` with `{project}` in its path, kept for
+    the five minutes the auth api says, and read again on an unknown key id at
+    most once a window; it must name the role `authenticated` and the audience
+    `authenticated`. Every read runs as its caller with the token's claims in
+    `request.jwt.claims` and `request.jwt.claim.sub`, as PostgREST hands them.
+    The bounds are patch 15's; over one is a refusal in PostgREST's shape
+    (`MS100` rows, `MS101` query string, `57014` the time limit). The route
+    table gains one route, and `router/surface_test.go` with it.
+    Paths: `adapters/caller_read.go`, `adapters/postgres/caller_read.go`,
+    `admission/admission.go`, `admission/gate.go`, `app/app.go`,
+    `config/config.go`, `config/postgrest.go`, `context/token_claims.go`,
+    `controllers/crud.go`, `controllers/deps.go`,
+    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `middlewares/token_role.go`, `projectkeys/`, `router/router.go`,
+    `router/surface_test.go`,
+    `integration/postgres/anonymousrole/postgrest_read_test.go`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

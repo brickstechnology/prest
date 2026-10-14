@@ -1,8 +1,9 @@
 package router_test
 
 // rest's surface. pREST v2.4.2 registers 26 routes in RegisterRoutes; rest
-// keeps the table read and the health address and nothing else, because it is
-// the one door of miniship the internet reaches directly. app/surface_test.go
+// keeps the table read and the health address, adds the Supabase SDK's read on
+// /rest/v1/{table} (miniship-cloud#1302), and nothing else, because it is the
+// one door of miniship the internet reaches directly. app/surface_test.go
 // sends a request of every removed shape through the composed stack.
 
 import (
@@ -26,6 +27,7 @@ import (
 var keptRoutes = []string{
 	"GET /_health",
 	"GET /{database}/{schema}/{table}",
+	"GET,HEAD /rest/v1/{table}",
 }
 
 // everythingOn is a config under which pREST registers every optional route it
@@ -80,13 +82,13 @@ func registeredRoutes(t *testing.T, cfg *config.Prest) []string {
 
 // Upstream registers 26 routes under this config. A route upstream adds on a
 // later rebase turns this red instead of opening.
-func TestRegisterRoutes_keepsOnlyTheTableReadAndTheHealthAddress(t *testing.T) {
+func TestRegisterRoutes_keepsTheTableReadTheSDKReadAndTheHealthAddress(t *testing.T) {
 	require.Equal(t, keptRoutes, registeredRoutes(t, everythingOn()))
 }
 
 // Upstream registers 25 routes here, all but sign-in: Studio's prefix is
 // registered with Studio off, and registeredRoutes always supplies the
 // stored-query registry.
-func TestRegisterRoutes_keepsTheSameTwoWithEverythingOff(t *testing.T) {
+func TestRegisterRoutes_keepsTheSameThreeWithEverythingOff(t *testing.T) {
 	require.Equal(t, keptRoutes, registeredRoutes(t, &config.Prest{PGDatabase: "given"}))
 }

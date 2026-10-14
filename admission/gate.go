@@ -50,6 +50,9 @@ type Gate struct {
 	mu      sync.Mutex
 	known   map[string]*entry
 	lookups int64
+	// only is the install's one Project, once a lookup that named none has
+	// said which it is (miniship-cloud#1302).
+	only string
 }
 
 // entry is what rest remembers about one Project between calls. It is three
@@ -99,6 +102,21 @@ func (g *Gate) Admit(ctx context.Context, project string) (adapters.Adapter, err
 	return g.admit(ctx, project, false)
 }
 
+// AdmitOnly answers with the adapter for the install's one Project and its
+// name, for an address that names no Project (miniship-cloud#1302): the SDK's
+// /rest/v1 on a self-host install. The answerer says which Project it is, and
+// refuses when the install holds several; rest asks once and keeps the
+// answer, as it keeps every other.
+func (g *Gate) AdmitOnly(ctx context.Context) (adapters.Adapter, string, error) {
+	adapter, err := g.admit(ctx, "", false)
+	if err != nil {
+		return nil, "", err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return adapter, g.only, nil
+}
+
 // Readmit looks project up again although rest already has a pool for it,
 // which is what a credential that was rotated needs. It is refused with
 // ErrTooSoon inside the window, so an authentication failure that the answerer
@@ -133,7 +151,7 @@ func (g *Gate) admit(ctx context.Context, project string, force bool) (adapters.
 	// after acquiring its own: the call this one queued behind has usually
 	// admitted the Project already.
 	if !force {
-		if adapter, err := g.registry.Get(project); err == nil {
+		if adapter, err := g.registry.Get(g.nameOf(project)); err == nil {
 			return adapter, nil
 		}
 	}
@@ -149,7 +167,14 @@ func (g *Gate) admit(ctx context.Context, project string, force bool) (adapters.
 		return nil, err
 	}
 
+	askedForOnly := project == ""
+	if askedForOnly {
+		project = answer.Project
+	}
 	adapter, err := g.open(project, answer, force)
+	if err == nil && askedForOnly {
+		g.remember(project)
+	}
 	g.finished(e, force, err)
 	if err != nil {
 		slog.Warn("a Project was not admitted", "project", project, "err", err.Error())
@@ -157,6 +182,25 @@ func (g *Gate) admit(ctx context.Context, project string, force bool) (adapters.
 	}
 	slog.Info("a Project was admitted while rest ran", "project", project)
 	return adapter, nil
+}
+
+// nameOf is the name project is registered under: itself, or for "" the
+// install's one Project once it is known.
+func (g *Gate) nameOf(project string) string {
+	if project != "" {
+		return project
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.only
+}
+
+// remember keeps the install's one Project's name, from a lookup that named
+// none.
+func (g *Gate) remember(project string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.only = project
 }
 
 // kept is the answer rest already has for this Project, when it is inside the

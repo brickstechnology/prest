@@ -35,6 +35,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/prest/prest/v2/internal/ident"
 )
 
 // APIKeyHeader is the header rest presents the install's api secret key in
@@ -116,7 +118,8 @@ func NewHTTPAnswerer(base, key string, timeout time.Duration) *HTTPAnswerer {
 	}
 }
 
-// Lookup asks for project alone.
+// Lookup asks for project alone. Asked for "", it asks for the install's one
+// Project, at the lookup address with no name (miniship-cloud#1302).
 func (a *HTTPAnswerer) Lookup(ctx context.Context, project string) (Answer, error) {
 	if a.key == "" {
 		return Answer{}, fmt.Errorf("%w: rest was given no api secret key for the lookup address", ErrUnavailable)
@@ -159,9 +162,15 @@ func (a *HTTPAnswerer) Lookup(ctx context.Context, project string) (Answer, erro
 // that names another Project is refused rather than admitted under the name
 // that was asked for: a lookup answers for exactly one Project, and the
 // credential in it opens that Project's Database alone.
+//
+// miniship-cloud#1302: asked for no Project at all, the answerer names the
+// install's one Project, and the answer is held to being a Project's name
+// rather than to the name asked for.
 func (a Answer) validFor(project string) error {
 	switch {
-	case a.Project != project:
+	case project == "" && !ident.IsSafeSegment(a.Project):
+		return fmt.Errorf("%w: the answer named no Project", ErrUnavailable)
+	case project != "" && a.Project != project:
 		return fmt.Errorf("%w: the answer named another Project", ErrUnavailable)
 	case a.URL == "":
 		return fmt.Errorf("%w: the answer carried no address", ErrUnavailable)
