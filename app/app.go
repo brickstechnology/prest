@@ -123,9 +123,9 @@ func New(cfg *config.Prest) (*App, error) {
 	// in the gateway's header or asks for the install's one, and checks a
 	// User's token against that Project's key set.
 	deps.ProjectHeader = cfg.PostgREST.ProjectHeader
-	if cfg.PostgREST.ProjectKeysURL != "" {
+	if cfg.PostgREST.ProjectKeysTemplate != "" {
 		conf := cfg.Admission.WithDefaults()
-		deps.UserTokens = projectkeys.New(cfg.PostgREST.ProjectKeysURLFor, conf.Timeout, conf.Window, conf.MaxProjects)
+		deps.UserTokens = projectkeys.New(cfg.PostgREST.ProjectKeysURL, conf.Timeout, conf.Window, conf.MaxProjects)
 	}
 	h := controllers.NewHandlers(deps, cfg)
 
