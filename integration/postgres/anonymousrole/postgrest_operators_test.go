@@ -98,7 +98,7 @@ func TestPostgREST_theArrayRangeAndFullTextFiltersReturnTheRowsADirectQueryRetur
 	stageOperators(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 
 	for _, c := range []struct {
 		// param is the query parameter the SDK writes, value its text.
@@ -155,7 +155,7 @@ func TestPostgREST_theArrayRangeAndFullTextFiltersWorkInsideOrAndAnd(t *testing.
 	stageOperators(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 
 	for _, c := range []struct{ param, value, where string }{
 		// A {…} run keeps its commas and its quotes: an array, and a json object.
@@ -189,7 +189,7 @@ func TestPostgREST_theArrayFiltersWorkOnAnEmbeddedTable(t *testing.T) {
 	stageOperators(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 
 	nested := func(notes string) string {
 		return `SELECT coalesce(json_agg(json_build_object('id', d.id, '` + opsNotes + `',
@@ -230,7 +230,7 @@ func TestPostgREST_aValueThatDoesNotParseIsTheDatabasesErrorCode(t *testing.T) {
 	stageOperators(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 
 	for _, c := range []struct {
 		param, value string
