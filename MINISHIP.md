@@ -437,7 +437,32 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_call_test.go`,
     `MINISHIP.md`
 
-23. **The Supabase SDK's array, range, jsonb and full-text filters** —
+23. **A token opens only the Project it is for** — miniship-cloud#1428, spec
+    #1374. On miniship cloud one `rest` serves every Project, and the gateway's
+    Check swaps a Project's key for a token it signs with the install's key
+    (ES256, `MINISHIP_JWT_KEYS`): role `anon` or `service_role`, and a
+    `project` claim. Patch 18 verifies that against the install's JWKS, which
+    is one key for every Project, so Project A's token verified on Project B's
+    address and read as its role there. Where `PROJECT_HEADER` is set, the
+    `/rest/v1` address now takes an install-signed token only when its
+    `project` claim is the Project the header names, and refuses any other,
+    one that names no Project included, with 401 `PGRST301`, PostgREST's
+    refusal of a token it cannot accept. The header is safe to hold it to
+    because the gateway removes a caller's own copy before any filter reads
+    the request and the Check writes it from the address the call arrived at.
+    A User's token is verified against that Project's key set alone, as patch
+    19 has it. A self-host install sets no `PROJECT_HEADER`, serves one
+    Project, and takes the install's tokens as before.
+    Paths: `controllers/postgrest_project_token.go`,
+    `controllers/postgrest_project_token_test.go`,
+    `controllers/postgrest_read.go`,
+    `integration/postgres/anonymousrole/postgrest_read_test.go`,
+    `integration/postgres/anonymousrole/postgrest_call_test.go`,
+    `integration/postgres/anonymousrole/postgrest_embed_test.go`,
+    `integration/postgres/anonymousrole/postgrest_write_test.go`,
+    `MINISHIP.md`
+
+24. **The Supabase SDK's array, range, jsonb and full-text filters** —
     miniship-cloud#1427, spec #1422: the read's filters (patch 19), and so a
     write's, a function's result's and an embedded table's, answer `cs`, `cd`,
     `ov`, `sl`, `sr`, `nxl`, `nxr`, `adj` and `fts`, `plfts`, `phfts`, `wfts`
