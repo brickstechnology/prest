@@ -3,7 +3,9 @@ package controllers
 // miniship (miniship-cloud#1302, public ADR 0077): PostgREST's query language
 // for a read, as the Supabase SDK's database client writes it. Reads only:
 // the columns named, the filters eq, neq, gt, gte, lt, lte, like, ilike, is,
-// in, each of them under not., an or=( … ) group, order, limit and offset.
+// in, the array, range and jsonb operators cs, cd, ov, sl, sr, nxl, nxr and adj
+// and the full-text operators fts, plfts, phfts and wfts (#1427), each of them
+// under not., an or=( … ) group, order, limit and offset.
 // Writes and function calls are their own tickets and have their own files
 // (#1303 postgrest_write.go, #1304 postgrest_call.go), which parse their
 // filters here. A read that embeds another table, an alias, a cast and a json
@@ -76,6 +78,52 @@ func pgrSplit(s string) []string {
 		switch {
 		case ch == '"':
 			quoted = !quoted
+		case ch == '(' && !quoted:
+			depth++
+			current.WriteRune(ch)
+		case ch == ')' && !quoted:
+			depth--
+			current.WriteRune(ch)
+		case ch == ',' && !quoted && depth == 0:
+			out = append(out, current.String())
+			current.Reset()
+		default:
+			current.WriteRune(ch)
+		}
+	}
+	return append(out, current.String())
+}
+
+// pgrSplitGroup splits the inside of an or / and group on its commas, as
+// QueryParams.hs's `pLogicTree` does: a value is a double-quoted run, or a
+// `{…}` run (a Postgres array or a flat json object, `pPgArray`), or the text up
+// to the next comma or closing parenthesis. A `{…}` run is kept as written, with
+// its quotes. A quoted run loses its quotes at the group's own level and keeps
+// them inside a nested group, which splits it again.
+func pgrSplitGroup(s string) []string {
+	var out []string
+	var current strings.Builder
+	depth := 0
+	quoted := false
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+		switch {
+		case ch == '{' && !quoted && i > 0 && runes[i-1] == '.':
+			end := i
+			for end < len(runes) && runes[end] != '}' {
+				end++
+			}
+			if end == len(runes) {
+				end--
+			}
+			current.WriteString(string(runes[i : end+1]))
+			i = end
+		case ch == '"':
+			quoted = !quoted
+			if depth > 0 {
+				current.WriteRune(ch)
+			}
 		case ch == '(' && !quoted:
 			depth++
 			current.WriteRune(ch)
@@ -298,12 +346,63 @@ func (q *pgrRead) predicate(column, expr string) (string, error) {
 		}
 		text = c + " IN (" + strings.Join(holes, ", ") + ")"
 	default:
-		return "", pgrRefuse("this operator is not answered here yet: the read answers eq, neq, gt, gte, lt, lte, like, ilike, is and in")
+		if symbol, ok := pgrSimpleOperators[op]; ok {
+			// PostgREST hands the value to the Database as an unknown literal
+			// (SqlFragment.hs, pgFmtFilter, `Op op val`), so `{a,b}`, a json
+			// value and a range literal are read by the column's own type; so
+			// is a parameter. A value that does not parse is the Database's
+			// 22P02, and an operator the column's type lacks is its 42883.
+			text = c + " " + symbol + " " + q.arg(value)
+			break
+		}
+		fts := pgrFtsOperator.FindStringSubmatch(op)
+		if fts == nil {
+			return "", pgrRefuse("this operator is not answered: the read answers eq, neq, gt, gte, lt, lte, like, ilike, is, in, cs, cd, ov, sl, sr, nxl, nxr, adj, fts, plfts, phfts and wfts")
+		}
+		// `@@ to_tsquery(config, value)`, with the config left out when the
+		// filter names none (SqlFragment.hs, `Fts op lang val`; QueryParams.hs,
+		// `pFts`, where the config is an identifier in parentheses).
+		call := pgrFtsFunctions[fts[1]] + "("
+		if config := strings.TrimSpace(fts[2]); config != "" {
+			call += q.arg(config) + ", "
+		} else if fts[2] != "" {
+			return "", pgrRefuse("a text search configuration is a plain name")
+		}
+		text = c + " @@ " + call + q.arg(value) + ")"
 	}
 	if negate {
 		text = "NOT (" + text + ")"
 	}
 	return text, nil
+}
+
+// pgrSimpleOperators are the operators that take one value as it is written, and
+// the Database's operator for each (SqlFragment.hs, `simpleOperator`): contains,
+// contained by, overlap, strictly left of, strictly right of, does not extend
+// to the left of, does not extend to the right of, adjacent to.
+var pgrSimpleOperators = map[string]string{
+	"cs":  "@>",
+	"cd":  "<@",
+	"ov":  "&&",
+	"sl":  "<<",
+	"sr":  ">>",
+	"nxl": "&>",
+	"nxr": "&<",
+	"adj": "-|-",
+}
+
+// pgrFtsOperator reads a full-text operator and its optional configuration,
+// `fts(english)` (QueryParams.hs, `pFts`: the configuration is an identifier of
+// letters, digits, _, $ and spaces).
+var pgrFtsOperator = regexp.MustCompile(`^(fts|plfts|phfts|wfts)(?:\(([A-Za-z0-9_ $]+)\))?$`)
+
+// pgrFtsFunctions is the query function each full-text operator calls
+// (SqlFragment.hs, `ftsOperator`).
+var pgrFtsFunctions = map[string]string{
+	"fts":   "to_tsquery",
+	"plfts": "plainto_tsquery",
+	"phfts": "phraseto_tsquery",
+	"wfts":  "websearch_to_tsquery",
 }
 
 // pgrList reads `(a,b,"c,d")`.
@@ -327,7 +426,7 @@ func (q *pgrRead) group(value, join string) (string, error) {
 		return "", pgrRefuse("a group is written or=(a.eq.1,b.eq.2)")
 	}
 	var predicates []string
-	for _, part := range pgrSplit(v[1 : len(v)-1]) {
+	for _, part := range pgrSplitGroup(v[1 : len(v)-1]) {
 		part = strings.TrimSpace(part)
 		var predicate string
 		var err error
