@@ -12,6 +12,7 @@ package anonymousrole_test
 // test can ask of rest alone.
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
@@ -130,6 +131,22 @@ func userToken(t *testing.T, key ed25519.PrivateKey, sub string) string {
 	return token
 }
 
+// projectToken is the token the gateway's Check puts in place of one of
+// project's keys (miniship-cloud#1428): the install's key, the key's role, and
+// the project claim that says where the token is worth anything.
+func projectToken(t *testing.T, key *ecdsa.PrivateKey, role, project string) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "install"))
+	require.NoError(t, err)
+	serialized, err := jwt.Signed(signer).Claims(map[string]any{
+		"iss": "miniship", "role": role, "project": project,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).Serialize()
+	require.NoError(t, err)
+	return serialized
+}
+
 // restForTheSDK is rest as an install composes it for the SDK's address: it
 // checks the install's tokens, reads the Project from the gateway's header,
 // and reads a User's key set from the Project's pool.
@@ -205,7 +222,7 @@ func TestPostgREST_eachFilterReturnsTheRowsADirectQueryReturns(t *testing.T) {
 	stagePostgREST(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 
 	for _, c := range []struct {
 		query, where, order string
@@ -244,7 +261,7 @@ func TestPostgREST_oneObjectAndTheCount(t *testing.T) {
 	stagePostgREST(t, db)
 	install := newInstall(t)
 	rest := restForTheSDK(t, cfg, install, newProjectPool(t, alias))
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 	object := map[string]string{"Accept": "application/vnd.pgrst.object+json"}
 
 	// single(): one row, as an object.
@@ -292,7 +309,7 @@ func TestPostgREST_theRowRulesDecideForEachCaller(t *testing.T) {
 
 	// The anon token, which the gateway puts in place of the publishable key.
 	// Expected: the published rows.
-	_, _, body := ask(t, rest, http.MethodGet, read, token(t, install.private, reader), nil)
+	_, _, body := ask(t, rest, http.MethodGet, read, projectToken(t, install.private, reader, alias), nil)
 	require.Equal(t, []int{1, 2, 3, 4, 5}, idsIn(t, body))
 
 	// Each User's own token. Expected: that User's rows, drafts included, and
@@ -304,7 +321,7 @@ func TestPostgREST_theRowRulesDecideForEachCaller(t *testing.T) {
 
 	// The api service token, which the gateway puts in place of the secret
 	// key. Expected: every row.
-	_, _, body = ask(t, rest, http.MethodGet, read, token(t, install.private, service), nil)
+	_, _, body = ask(t, rest, http.MethodGet, read, projectToken(t, install.private, service, alias), nil)
 	require.Equal(t, []int{1, 2, 3, 4, 5, 6, 7}, idsIn(t, body))
 
 	// A User's token signed by a key that is not the Project's pool's.
@@ -314,6 +331,22 @@ func TestPostgREST_theRowRulesDecideForEachCaller(t *testing.T) {
 	status, _, body := ask(t, rest, http.MethodGet, read, userToken(t, stranger, userA), nil)
 	require.Equal(t, http.StatusUnauthorized, status, body)
 	require.Contains(t, body, `"code":"PGRST301"`)
+
+	// miniship-cloud#1428: another Project's User, signed by that Project's
+	// own pool, and another Project's keys as the Check swaps them, both
+	// carried to this Project's address. Expected: 401 PGRST301 for each.
+	other := newProjectPool(t, "prj_another")
+	status, _, body = ask(t, rest, http.MethodGet, read, userToken(t, other.private, userA), nil)
+	require.Equal(t, http.StatusUnauthorized, status, body)
+	require.Contains(t, body, `"code":"PGRST301"`)
+	for _, role := range []string{reader, service} {
+		status, _, body = ask(t, rest, http.MethodGet, read, projectToken(t, install.private, role, "prj_another"), nil)
+		require.Equal(t, http.StatusUnauthorized, status, body)
+		require.Contains(t, body, `"code":"PGRST301"`)
+	}
+	// The install's own token, which names no Project. Expected: refused here.
+	status, _, body = ask(t, rest, http.MethodGet, read, token(t, install.private, service), nil)
+	require.Equal(t, http.StatusUnauthorized, status, body)
 
 	// The same User's token on today's address. Expected: refused, as before.
 	status, _ = getWith(t, rest, "/"+alias+"/public/"+articles, "Bearer "+userToken(t, pool.private, userA))
@@ -328,7 +361,7 @@ func TestPostgREST_theBoundsAreRefusedInTheSDKsShape(t *testing.T) {
 		c.PGMaxPageSize = 3
 		c.PGStatementTimeoutMS = 250
 	})
-	anon := token(t, install.private, reader)
+	anon := projectToken(t, install.private, reader, alias)
 	refusal := func(body string) map[string]any {
 		var answer map[string]any
 		require.NoError(t, json.Unmarshal([]byte(body), &answer), body)

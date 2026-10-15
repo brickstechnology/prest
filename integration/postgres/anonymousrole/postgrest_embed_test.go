@@ -111,12 +111,12 @@ func newEmbedRest(t *testing.T) (embedRest, *sql.DB) {
 		// The time limit is the machine's to spare: these subjects ask what
 		// the answer is, and the bound itself is held by query_bounds_test.go.
 		server: restForTheSDK(t, cfg, install, pool, func(c *config.Prest) { c.PGStatementTimeoutMS = 120000 }),
-		anon:   token(t, install.private, reader),
+		anon:   projectToken(t, install.private, reader, alias),
 		user: map[string]string{
 			userA: userToken(t, pool.private, userA),
 			userB: userToken(t, pool.private, userB),
 		},
-		admin: token(t, install.private, service),
+		admin: projectToken(t, install.private, service, alias),
 	}, db
 }
 
