@@ -148,8 +148,8 @@ func newCallFixture(t *testing.T, with ...func(*config.Prest)) callFixture {
 		rest: restForTheSDK(t, cfg, install, pool, with...),
 		a:    userToken(t, pool.private, userA),
 		b:    userToken(t, pool.private, userB),
-		anon: token(t, install.private, reader),
-		svc:  token(t, install.private, service),
+		anon: projectToken(t, install.private, reader, alias),
+		svc:  projectToken(t, install.private, service, alias),
 	}
 }
 
