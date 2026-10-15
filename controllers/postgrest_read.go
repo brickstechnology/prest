@@ -229,7 +229,11 @@ func (h *CRUDHandler) resolveCaller(r *http.Request, project string, adapter ada
 		return adapters.Caller{Role: role, Claims: claims}, nil
 	}
 	if role, ok := pctx.TokenRole(ctx); ok {
-		return adapters.Caller{Role: role, Claims: pctx.TokenClaims(ctx)}, nil
+		claims := pctx.TokenClaims(ctx)
+		if err := h.checkTokenProject(claims, project); err != nil {
+			return adapters.Caller{}, err
+		}
+		return adapters.Caller{Role: role, Claims: claims}, nil
 	}
 	roles, _ := h.rolesOf(adapter)
 	role, ok := anonymousRole(roles, project)

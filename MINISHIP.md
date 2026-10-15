@@ -171,8 +171,7 @@ you mean the files, and the directory only when the patch owns all of it.
     `adapters/postgres/internal/connection/conn_test.go`,
     `adapters/postgres/internal/connection/application_name_test.go`,
     `integration/postgres/twoprojects/`, `.github/workflows/miniship.yml`
-
-12. **The query string is reviewed, and every read is bounded** — `rest` is the
+15. **The query string is reviewed, and every read is bounded** — `rest` is the
     one door the internet reaches directly, and four of pREST's six advisories
     on this surface were the same class of mistake in `_select`, `_count` and
     `_groupby`, each found after the last was patched. `controllers/query_screen.go`
@@ -438,38 +437,29 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_call_test.go`,
     `MINISHIP.md`
 
-23. **The Supabase SDK's array, range, jsonb and full-text filters** —
-    miniship-cloud#1427, spec #1422: the read's filters (patch 19), and so a
-    write's, a function's result's and an embedded table's, answer `cs`, `cd`,
-    `ov`, `sl`, `sr`, `nxl`, `nxr`, `adj` and `fts`, `plfts`, `phfts`, `wfts`
-    with PostgREST v12.2.3's meaning, under `not.`, inside `or=( … )` and
-    `and=( … )`, and on `other.col=…`. These are what the SDK's `contains`,
-    `containedBy`, `overlaps`, `rangeGt`, `rangeGte`, `rangeLt`, `rangeLte`,
-    `rangeAdjacent` and `textSearch` write. The operators are SqlFragment.hs's
-    `simpleOperator` (`@>`, `<@`, `&&`, `<<`, `>>`, `&>` for `nxl`, `&<` for
-    `nxr`, `-|-`) and `ftsOperator` (`@@ to_tsquery`, `plainto_tsquery`,
-    `phraseto_tsquery`, `websearch_to_tsquery`); the optional configuration is
-    QueryParams.hs's `pFts`, an identifier in parentheses (`fts(english)`), and
-    is the function's first argument. A value is handed to the Database as one
-    parameter of unknown type, as `pgFmtFilter` hands it as an unknown literal,
-    so `{a,b}`, a json value and a range literal (`[1,5)`) are read by the
-    column's own type and nothing of it becomes SQL text. A value that does not
-    parse is therefore the Database's own error with its SQLSTATE and
-    PostgREST's status (`22P02` 400 for a malformed array, json or range;
-    `42601` 400 for a tsquery it cannot read; `42704` 400 for a configuration
-    it lacks), and an operator the column's type lacks is `42883`, now 404 on
-    a read as PostgREST gives it (Error.hs, `pgErrorStatus`; a write already
-    answered it so). An operator name rest does not know, or a configuration
-    that is not an identifier, is `PGRST100`. Inside a group the items are
-    split as QueryParams.hs's `pLogicSingleVal` reads them: a double-quoted
-    value (`span.sl."[15,30)"`) keeps its comma and loses its quotes, and a
-    `{…}` run (`tags.cs.{a,b}`, `meta.cs.{"k":"v","n":1}`) is kept as written.
-    A quoted value inside a nested group now keeps its quotes until that group
-    splits it. Not answered: `eq(any)` and `eq(all)`, `match`, `imatch`,
-    `isdistinct` (spec #1422 puts them out of scope).
-    Paths: `controllers/postgrest_operators_test.go`,
-    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
-    `integration/postgres/anonymousrole/postgrest_operators_test.go`,
+23. **A token opens only the Project it is for** — miniship-cloud#1428, spec
+    #1374. On miniship cloud one `rest` serves every Project, and the gateway's
+    Check swaps a Project's key for a token it signs with the install's key
+    (ES256, `MINISHIP_JWT_KEYS`): role `anon` or `service_role`, and a
+    `project` claim. Patch 18 verifies that against the install's JWKS, which
+    is one key for every Project, so Project A's token verified on Project B's
+    address and read as its role there. Where `PROJECT_HEADER` is set, the
+    `/rest/v1` address now takes an install-signed token only when its
+    `project` claim is the Project the header names, and refuses any other,
+    one that names no Project included, with 401 `PGRST301`, PostgREST's
+    refusal of a token it cannot accept. The header is safe to hold it to
+    because the gateway removes a caller's own copy before any filter reads
+    the request and the Check writes it from the address the call arrived at.
+    A User's token is verified against that Project's key set alone, as patch
+    19 has it. A self-host install sets no `PROJECT_HEADER`, serves one
+    Project, and takes the install's tokens as before.
+    Paths: `controllers/postgrest_project_token.go`,
+    `controllers/postgrest_project_token_test.go`,
+    `controllers/postgrest_read.go`,
+    `integration/postgres/anonymousrole/postgrest_read_test.go`,
+    `integration/postgres/anonymousrole/postgrest_call_test.go`,
+    `integration/postgres/anonymousrole/postgrest_embed_test.go`,
+    `integration/postgres/anonymousrole/postgrest_write_test.go`,
     `MINISHIP.md`
 
 ## Taking an upstream fix
