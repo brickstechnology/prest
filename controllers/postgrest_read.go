@@ -306,6 +306,11 @@ func pgrReadFailure(err error) error {
 			failure.hint = "ask for fewer rows, or add a filter an index can answer"
 		case "22P02", "22007", "22008", "42883":
 			failure.message = "a filter's value is not of its column's type"
+			if string(pqErr.Code) == "42883" {
+				// An operator the column's type lacks (cs on an integer) is
+				// 404 as PostgREST gives it (Error.hs, pgErrorStatus).
+				failure.status = http.StatusNotFound
+			}
 		}
 	}
 	if status == http.StatusGatewayTimeout {
