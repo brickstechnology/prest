@@ -102,6 +102,11 @@ func TestDefaultAdapter(t *testing.T) {
 // /a/public/t and /b/public/t each reach their own adapter. Regression guard
 // for the adapter selector running after route matching.
 func TestNew_RoutesRequestToMatchingAdapter(t *testing.T) {
+	// miniship: rest does not connect at start-up (miniship-cloud#547), so
+	// connectAdapter, the seam this injects through, is never called.
+	// app/two_projects_test.go sends each Project's read to its own Database
+	// through the composed handler (patch 12).
+	t.Skip("miniship: rest composes without connectAdapter; app/two_projects_test.go covers this")
 	byAlias := map[string]*mock.Mock{"a": mock.New(t), "b": mock.New(t)}
 	byAlias["a"].AddItem([]byte(`[{"from":"a"}]`), nil, false)
 	byAlias["b"].AddItem([]byte(`[{"from":"b"}]`), nil, false)

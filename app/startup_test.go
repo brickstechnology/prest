@@ -14,9 +14,12 @@ import (
 )
 
 // TestNew_Registry_OneUnreachable_StartsAndRegistersLazy: one of two registry
-// entries refuses connections. Startup succeeds, the dead alias is served by an
-// unconnected postgres adapter, and it was dialled once (no Timescale→Postgres
-// retry, no dial when building the lazy adapter).
+// entries refuses connections. Startup succeeds and the dead alias is served by
+// an unconnected postgres adapter.
+//
+// miniship: rest dials no entry at start-up (miniship-cloud#547), so the dead
+// one was dialled zero times where upstream dials it once, and the default
+// adapter is the first configured alias whether or not it is up.
 func TestNew_Registry_OneUnreachable_StartsAndRegistersLazy(t *testing.T) {
 	dials := stubConnectFailure(t, "down_db")
 
@@ -29,11 +32,8 @@ func TestNew_Registry_OneUnreachable_StartsAndRegistersLazy(t *testing.T) {
 	down, err := got.Adapters.Get("down")
 	require.NoError(t, err)
 	require.Equal(t, "*postgres.postgres", fmt.Sprintf("%T", down))
-	require.Equal(t, 1, dials["down_db"])
-
-	live, err := got.Adapters.Get("live")
-	require.NoError(t, err)
-	require.Same(t, live, cfg.Adapter, "default adapter must be the reachable alias")
+	require.Equal(t, 0, dials["down_db"])
+	require.Same(t, down, cfg.Adapter, "default adapter is the first configured alias")
 }
 
 // TestNew_Registry_MySQLUnreachable_RegistersLazyMySQL: an unreachable mysql
@@ -59,15 +59,20 @@ func TestNew_Registry_MySQLUnreachable_RegistersLazyMySQL(t *testing.T) {
 	require.Equal(t, "shop", my.GetDatabase())
 }
 
-// TestNew_Registry_AllUnreachable_Fails: when no entry can be reached the
-// configuration is broken as a whole, so startup still fails.
+// TestNew_Registry_AllUnreachable_Fails: upstream fails start-up when no entry
+// can be reached.
+//
+// miniship: rest reaches none at start-up (miniship-cloud#547), so it starts,
+// having dialled nothing, and a read of a Database that is down is refused
+// when it is asked for.
 func TestNew_Registry_AllUnreachable_Fails(t *testing.T) {
-	stubConnectFailure(t, "a_db", "b_db")
+	dials := stubConnectFailure(t, "a_db", "b_db")
 
 	cfg := &config.Prest{Databases: []config.DatabaseConf{baseDBConf("a"), baseDBConf("b")}}
 	got, err := app.New(cfg)
-	require.Nil(t, got)
-	require.ErrorIs(t, err, adapters.ErrUnavailable)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Empty(t, dials)
 }
 
 // TestNew_Registry_ConfigErrorStillFatal: an unknown engine is a config
@@ -83,15 +88,18 @@ func TestNew_Registry_ConfigErrorStillFatal(t *testing.T) {
 	require.False(t, adapters.IsUnavailable(err))
 }
 
-// TestNew_DetectAdapter_DialError_NoPostgresRetry: single-database mode keeps
-// failing fast, after a single dial instead of Timescale plus Postgres.
+// TestNew_DetectAdapter_DialError_NoPostgresRetry: upstream's no-registry mode
+// fails fast after a single dial.
+//
+// miniship: rest dials nothing at start-up (miniship-cloud#547), so a database
+// that is down does not stop it starting.
 func TestNew_DetectAdapter_DialError_NoPostgresRetry(t *testing.T) {
 	dials := stubConnectFailure(t, "prest")
 
 	got, err := app.New(connectablePrest("prest"))
-	require.Nil(t, got)
-	require.True(t, adapters.IsUnavailable(err))
-	require.Equal(t, 1, dials["prest"])
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, 0, dials["prest"])
 }
 
 // TestNew_DefaultAdapterIsFirstConfiguredAlias: the default adapter (health,

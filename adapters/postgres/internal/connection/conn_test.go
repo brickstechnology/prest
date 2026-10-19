@@ -113,6 +113,12 @@ func TestAddDatabaseToPool_appliesPoolLimits(t *testing.T) {
 // already pooled keep working.
 func TestAddDatabaseToPool_CapsDistinctPools(t *testing.T) {
 	m := testManager(t)
+	// miniship: the manager refuses a name it was not given (patch 2), so the
+	// names this fills the pool with are given, as pg.allowed_databases.
+	for i := range maxPools {
+		m.cfg.AllowedDatabases = append(m.cfg.AllowedDatabases, fmt.Sprintf("db%d", i))
+	}
+	m.cfg.AllowedDatabases = append(m.cfg.AllowedDatabases, "one-too-many")
 
 	var connectCalls int32
 	origConnect := dbConnect
@@ -177,6 +183,8 @@ func TestAddDatabaseToPool_CapRecheckedAfterConnect(t *testing.T) {
 		}
 	})
 
+	// miniship: a name the manager was given, as the test above has it.
+	m.cfg.AllowedDatabases = []string{"late"}
 	_, err := m.AddDatabaseToPool("late")
 	require.ErrorIs(t, err, adapters.ErrUnavailable)
 	require.Len(t, m.GetPool().DB, maxPools)

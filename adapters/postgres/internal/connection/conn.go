@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -100,15 +101,18 @@ func (m *Manager) hasRegistry() bool {
 }
 
 // ErrDatabaseNotGiven is returned for a database name that is neither a
-// registry alias nor the configured default database.
+// registry alias, the configured default database, nor one of
+// pg.allowed_databases.
 var ErrDatabaseNotGiven = errors.New("database not registered")
 
-// GetURI postgres connection URI for a registry alias or the configured
-// default database, and "" for any other name.
+// GetURI postgres connection URI for a registry alias, the configured
+// default database or a name pg.allowed_databases lists, and "" for any other
+// name.
 //
 // miniship: upstream built a URI for any other name too, as a database of that
 // name on the default host, so a path segment could reach every database that
-// host serves. rest connects to the databases it was given and no others.
+// host serves; since v2.5.2 its handlers refuse such a name, and its manager
+// still builds one. rest connects to the databases it was given and no others.
 func (m *Manager) GetURI(name string) string {
 	uri, _ := m.uriFor(name)
 	return uri
@@ -118,13 +122,19 @@ func (m *Manager) uriFor(name string) (string, bool) {
 	if conf, ok := m.cfg.ProfileByAlias(name); ok {
 		return BuildURI(conf, m.cfg), true
 	}
+	dbName := m.cfg.PGDatabase
 	if name != "" && name != m.cfg.PGDatabase {
-		return "", false
+		// pg.allowed_databases are given too: databases on the same host,
+		// reached with the same login (upstream v2.5.0).
+		if !slices.Contains(m.cfg.AllowedDatabases, name) {
+			return "", false
+		}
+		dbName = name
 	}
 
 	dbURI := fmt.Sprintf("user=%s dbname=%s host=%s port=%v sslmode=%v connect_timeout=%d",
 		m.cfg.PGUser,
-		m.cfg.PGDatabase,
+		dbName,
 		m.cfg.PGHost,
 		m.cfg.PGPort,
 		m.cfg.PGSSLMode,

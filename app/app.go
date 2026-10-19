@@ -55,6 +55,11 @@ type App struct {
 // nobody calls costs nothing. registerDatabases, connectAdapterForDatabase and
 // detectAndCreateAdapter stay in the tree, unused, for an upstream rebase.
 func New(cfg *config.Prest) (*App, error) {
+	// An engine pREST does not know is a configuration mistake, refused
+	// before anything is built (upstream v2.5.0; Load checks it too).
+	if err := cfg.ValidateEngines(); err != nil {
+		return nil, err
+	}
 	registry := adapters.NewRegistry()
 	// miniship: nothing is reached at start-up, so nothing is unreachable.
 	var unreachable map[string]struct{}
@@ -82,7 +87,7 @@ func New(cfg *config.Prest) (*App, error) {
 	} else if cfg.Adapter == nil {
 		// No registry: one adapter for pg.database; pg.allowed_databases share
 		// its host and credentials. miniship: created unconnected.
-		adapter := postgres.New(cfg)
+		adapter := unconnectedAdapter(cfg)
 		setCurrentDatabase(adapter, cfg.PGDatabase)
 		cfg.Adapter = adapter
 		if err := registerServedAliases(registry, cfg, adapter); err != nil {
@@ -589,7 +594,9 @@ func lazyAdapterForDatabase(dbCfg *config.Prest, dbConf *config.DatabaseConf) ad
 }
 
 // createAdapterForDatabase creates an unconnected adapter for one registry
-// entry. Every database uses the postgres adapter.
+// entry: the postgres adapter, or upstream's mysql adapter for an entry whose
+// engine is mysql (v2.5.0), which rest builds but does not read with, since it
+// becomes no anonymous role.
 //
 // miniship: two things went from upstream's connectAdapterForDatabase
 // (miniship-cloud#547). The adapter is not connected, so composing rest
@@ -606,10 +613,25 @@ func createAdapterForDatabase(cfg *config.Prest, dbConf *config.DatabaseConf) ad
 	dbCfg := scopedConfig(cfg, dbConf)
 	dbCfg.Databases = []config.DatabaseConf{*dbConf}
 
+	if dbCfg.Engine == config.EngineMySQL {
+		my := mysql.New(&dbCfg)
+		my.SetDatabase(dbConf.Alias)
+		slog.Info("using mysql adapter for database", "alias", dbConf.Alias)
+		return my
+	}
 	adapter := postgres.New(&dbCfg)
 	setCurrentDatabase(adapter, dbConf.Database)
 	slog.Info("using postgres adapter for database", "alias", dbConf.Alias)
 	return adapter
+}
+
+// unconnectedAdapter is the no-registry adapter, of the configured engine,
+// with no connection opened (miniship-cloud#547).
+func unconnectedAdapter(cfg *config.Prest) adapters.Adapter {
+	if config.EffectiveEngine(nil, cfg) == config.EngineMySQL {
+		return mysql.New(cfg)
+	}
+	return postgres.New(cfg)
 }
 
 // setCurrentDatabase names the database an adapter answers for when a caller

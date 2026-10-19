@@ -145,7 +145,7 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	// miniship: the query string, reviewed, before anything is built and
 	// before any connection is opened. query_screen.go is the second wall;
 	// what the builders below read is the query it rebuilt, never the
-	// caller's own.
+	// caller's own (#549).
 	if len(r.URL.RawQuery) > h.bounds.MaxQueryLen {
 		jsonError(w, queryTooLong, http.StatusRequestURITooLong)
 		return
@@ -353,6 +353,14 @@ func readFailure(err error, table string) (int, string) {
 		return http.StatusInternalServerError, adapters.ErrRoleNotEntered.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, timeLimitMessage
+	case errors.Is(err, adapters.ErrRelationNotFound):
+		// Upstream's sentinel for a relation that is not there (v2.5.0).
+		return http.StatusNotFound, "no such table"
+	case adapters.IsUnavailable(err):
+		// Upstream's sentinel for a Database it cannot reach, or a pool it
+		// will not open (v2.5.0), which it answers 503. rest answers the
+		// Database not being readable 502, as below (#548).
+		return http.StatusBadGateway, "the Database could not be read"
 	}
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {

@@ -184,6 +184,10 @@ func TestCRUDHandler_Select_UsesContextAdapter(t *testing.T) {
 	selected.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
 
 	h := NewCRUDHandler(Deps{
+		// miniship: the read becomes the anonymous role (patch 5), and the
+		// context's adapter is what it reads on.
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(selected),
 		Perms:    mockgen.NewMockPermissionsChecker(ctrl),
 		SQL:      mockgen.NewMockSQLBuilder(ctrl),
 		Builder:  mockgen.NewMockRequestQueryBuilder(ctrl),
@@ -352,6 +356,9 @@ func TestCRUDHandler_Select_GroupByBinder(t *testing.T) {
 	)
 
 	h := NewCRUDHandler(Deps{
+		// miniship: the read becomes the anonymous role (patch 5).
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(executor),
 		Perms:    perms,
 		SQL:      sqlBuilder,
 		Builder:  builder,
@@ -579,7 +586,8 @@ func TestCRUDHandler_Select_ErrRelationNotFound(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	// miniship: the read becomes the anonymous role (patch 5).
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/missing", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "missing",
 	})
@@ -975,7 +983,8 @@ func TestCRUDHandler_Select_NoRegistry_UnknownDB_400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.Select(rec, req)
 
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	// miniship: not found, where upstream answers 400 (patch 2).
+	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), "database not registered")
 }
 
@@ -1859,11 +1868,14 @@ func TestCRUDHandler_Select_DatabaseUnavailable(t *testing.T) {
 	scanner.EXPECT().Err().Return(dialError())
 	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
 
-	h := NewCRUDHandler(Deps{Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	// miniship: the read becomes the anonymous role (patch 5).
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	rec := runSelect(t, h, http.MethodGet)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	require.Contains(t, rec.Body.String(), "database unavailable")
+	// miniship: a Database rest cannot read is 502 (patch 17), where
+	// upstream answers 503.
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), "the Database could not be read")
 	require.NotContains(t, rec.Body.String(), "dial")
 }
 
