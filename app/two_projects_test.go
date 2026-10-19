@@ -40,7 +40,7 @@ const (
 
 // restProjectsConf is rest as the cloud composes it: a registry of Databases,
 // each on its own host, each read as its own anonymous role, with pREST's
-// single-database mode off and its access list off.
+// access list off.
 func restProjectsConf(dbs map[string]*countingDatabase) *config.Prest {
 	cfg := &config.Prest{
 		HTTPTimeout:   5,
@@ -50,7 +50,6 @@ func restProjectsConf(dbs map[string]*countingDatabase) *config.Prest {
 		PGConnTimeout: 2,
 		PGMaxOpenConn: 1,
 		JSONAggType:   "jsonb_agg",
-		SingleDB:      false,
 		AccessConf:    config.AccessConf{Restrict: false},
 	}
 	for _, alias := range []string{projectA, projectB, projectC} {

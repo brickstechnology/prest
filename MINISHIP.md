@@ -10,8 +10,8 @@ scratch, is recorded in miniship-cloud's ADR 0017.
 
 | | |
 | --- | --- |
-| Upstream tag | `v2.4.2` |
-| Upstream commit | `9070bda7e9ab6b6484e04a0983b8afd61c8315e6` |
+| Upstream tag | `v2.5.2` |
+| Upstream commit | `18169d6c48bcf1c1769e1ded8dfa399cb6b0cbf4` |
 | Branch | `miniship`, the fork's default branch |
 | Go module path | `github.com/prest/prest/v2`, kept so an upstream rebase does not conflict on every import |
 
@@ -26,7 +26,7 @@ backticks:
   point.
 
 A `prestd` built from this branch reports the tag on the miniship line:
-`prestd version` ends in `2.4.2+miniship`.
+`prestd version` ends in `2.5.2+miniship`.
 
 Upstream's `LICENSE` (MIT) is kept unchanged. miniship's changes are commits on
 `miniship` above the tag, and miniship's public monorepo pins one commit of this
@@ -50,12 +50,15 @@ you mean the files, and the directory only when the patch owns all of it.
 2. **A database `rest` was not given is refused** — without a registry,
    upstream tried any path segment as a database of that name on its one
    configured host. `connection.Manager` now resolves a registry alias or the
-   configured database and nothing else, `IsRegistered` agrees, and the table
-   read answers such a name 404 without opening a connection.
+   configured database and nothing else, and the table read answers such a
+   name 404 without opening a connection. Upstream's v2.5.0 refuses it in
+   `IsRegistered` too, and adds `pg.allowed_databases`, other databases on the
+   same host that are served without a registry; the manager resolves those as
+   given, and still builds a URI for no other name, which upstream's does.
    Paths: `adapters/postgres/internal/connection/conn.go`,
    `adapters/postgres/internal/connection/conn_test.go`,
    `adapters/postgres/internal/connection/given_test.go`,
-   `adapters/postgres/postgres.go`, `adapters/postgres/postgres_test.go`,
+   `adapters/postgres/postgres_test.go`,
    `adapters/postgres/query_registry_test.go`, `controllers/crud.go`,
    `controllers/crud_test.go`,
    `integration/postgres/adapters/postgres/postgres_test.go`
@@ -88,7 +91,7 @@ you mean the files, and the directory only when the patch owns all of it.
    may not have, and prints how many of its subjects got that Postgres;
    `miniship.yml` fails when that line is missing.
    Paths: `adapters/anonymous_role.go`, `adapters/postgres/anonymous_role.go`,
-   `adapters/timescaledb/anonymous_role.go`, `config/config.go`,
+   `adapters/timescaledb/anonymous_role.go`, `config/config.go`, `config/db.go`,
    `config/database_registry.go`, `config/anonymous_role_test.go`,
    `controllers/crud.go`, `controllers/crud_test.go`,
    `controllers/crud_anonymous_role_test.go`, `controllers/deps.go`,
@@ -108,10 +111,13 @@ you mean the files, and the directory only when the patch owns all of it.
    image carries no shell and no HTTP client for a container health check to
    run.
    Paths: `cmd/health.go`, `cmd/health_test.go`, `cmd/root.go`
-9. **A bounded pool for an environment registry entry** — upstream gave a
+9. **A bounded pool for an environment registry entry** — pREST v2.4.2 gave a
    `DATABASE_URL_<n>` entry 0 open connections, which `database/sql` reads as
-   no limit. It now takes `pg.maxopenconn` and `pg.maxidleconn`.
-   Paths: `config/database_registry.go`, `config/anonymous_role_test.go`
+   no limit. It takes `pg.maxopenconn` and `pg.maxidleconn` now, and since
+   v2.5.0 that is upstream's own `fillPoolDefaults`, so this patch changes no
+   line of its own. The number stays so the ones after it keep theirs, and its
+   test stays as the check that upstream still does it.
+   Paths: `config/anonymous_role_test.go`
 10. **This record, and the check on it** — a vendored copy takes an upstream
     fix only when somebody notices it exists, so the fork point is written where
     a program can read it and the branch is held to what is written.
@@ -120,10 +126,11 @@ you mean the files, and the directory only when the patch owns all of it.
     `rebase/...` branch so a rebase is checked before it replaces `miniship`.
     Paths: `MINISHIP.md`, `miniship/record.go`, `miniship/record_test.go`,
     `.github/workflows/miniship.yml`
-11. **The binary names its upstream tag** — upstream's fallback version is
-    `2.0.0`, and the public monorepo builds this with no `-ldflags` that
-    replace it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
-    `2.4.2+miniship` now, set by an `init` in a file of miniship's own rather
+11. **The binary names its upstream tag** — upstream's fallback version was
+    `2.0.0`, and is `devel` from v2.5.0, and the public monorepo builds this
+    with no `-ldflags` that replace it, so `prestd version` said `2.0.0` on a
+    `v2.4.2` tree. It says `2.5.2+miniship` now, set by an `init` in a file of
+    miniship's own rather
     than by editing upstream's literal, which upstream moves on every version
     bump and would conflict on every rebase. `cmd/version_miniship_test.go`
     holds it to the fork point above, so a rebase that moves one and not the
@@ -196,7 +203,7 @@ you mean the files, and the directory only when the patch owns all of it.
     `controllers/query_screen_test.go`, `controllers/crud.go`,
     `controllers/crud_test.go`, `controllers/deps.go`,
     `controllers/helpers.go`, `adapters/postgres/anonymous_role.go`,
-    `config/config.go`, `middlewares/middlewares.go`,
+    `config/config.go`, `config/db.go`, `middlewares/middlewares.go`,
     `middlewares/middlewares_test.go`, `app/query_screen_test.go`,
     `app/error_body_test.go`,
     `integration/postgres/anonymousrole/query_bounds_test.go`,
@@ -496,6 +503,37 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_operators_test.go`,
     `MINISHIP.md`
 
+25. **v2.5.2, and the three advisories it fixes** — miniship-cloud#1451 to
+    #1454. pREST published GHSA-2x9q-r7j9-g85f (the stored-query control
+    plane runs SQL anyone stored), GHSA-fhf5-m388-4w4p (the catalog answers
+    without a token) and GHSA-fmr6-9j48-xrqp (`/_PLUGIN/{file}` loads a `.so`
+    by traversal) on 19 October 2026, fixed in v2.5.2 by upstream's
+    `e7b5881` (#1070) and, for the database listing, `0a83204` (#1068).
+    None of the three reached `rest` as shipped: patch 4 never registered
+    `/_QUERIES`, `/_PLUGIN`, `/databases`, `/schemas`, `/tables`, `/show` or
+    `/{database}/{schema}`, so the requests they make are not found before
+    and after. What v2.5.2 fixes underneath is taken whole: pREST's
+    control-plane tables are refused by the table read, the plugin loader
+    refuses a name that leaves its directory before it opens anything, and
+    the database listing names only the databases rest was given.
+    `app/advisories_test.go` asks each of the three of the composed stack;
+    the subjects of the fixes underneath fail on the fork before this rebase
+    and pass on it. `router/router_test.go` is upstream's test of its new
+    route stacks, turned into the same advisories' requests answered not
+    found, with auth on and off. One collision, decided for rest: upstream
+    refuses its reserved table names on every three-segment path, and so on
+    the Supabase SDK's `/rest/v1/{table}`, which pREST's access list reads as
+    a table of a Database called `rest` in a schema called `v1`. A Project
+    may own a table called `prest_users`, and rest keeps no control-plane
+    table in a Project's Database, so that address is not a pREST table path
+    (`middlewares/utils.go`) and the Database's grants decide, as patch 19
+    has it. Upstream's start-up tests of the connections v2.5.0 makes at
+    start-up are rest's patch 13 now: nothing is dialled, so nothing is
+    unreachable.
+    Paths: `app/advisories_test.go`, `app/startup_test.go`,
+    `app/startup_internal_test.go`, `middlewares/utils.go`,
+    `router/router_test.go`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue
@@ -599,14 +637,53 @@ this one did not — two commits is a small sample of what a release moves.
 [#1032]: https://github.com/prest/prest/pull/1032
 [#1033]: https://github.com/prest/prest/pull/1033
 
+### Taken: v2.5.2, 19 October 2026
+
+The first real rebase, onto upstream's `v2.5.2` (`18169d6`), for
+miniship-cloud#1148, #1164 and #1451 (v2.5.0 to v2.5.2) and the three
+advisories v2.5.2 fixes (#1452 to #1454, patch 25). `v2.4.2..v2.5.2` is 11
+upstream commits and 221 files: MySQL as a second engine, a per-request
+adapter in the handlers, `pg.allowed_databases`, unreachable-at-start-up
+registry entries served lazily, `config.go` split into a file per section,
+`pg.single` removed, and the security hardening.
+
+| | |
+| --- | --- |
+| Step 1, rebase | `git rebase --onto v2.5.2 v2.4.2` replayed **35 commits**, dropping 19 merges. **12 of them conflicted**, in 12 files; `controllers/crud.go`, `app/app.go` and `config/config.go` most. One commit on top, `fff0ec8`, settles what upstream's new code changed under the patches |
+| Step 2, record | the fork-point rows, `2.5.2+miniship`, patches 2, 5, 9 and 15's `Paths:` lines, and patch 25. Chain tagged `patches/v2.5.2` |
+| Step 3, suite | `go vet` clean; unit as CI runs it, `EXIT 0`; integration on CI, **147 top-level tests ran and 201 skipped**, and the three census lines 9 of 9, 53 of 53, 4 of 4 |
+| Step 4, merge | `git merge -s ours origin/miniship`; `git diff v2.5.2 HEAD` is **96 files**, every one a path a `Paths:` line names |
+
+**The merges are where the work hid.** Four patch lines had been developed on
+parallel branches and joined by merge commits whose resolutions the rebase
+drops (#547 against #549, #1427 against #1428 among them), so those had to be
+settled again, by reading the old line's file beside upstream's. The check
+that caught a wrong one was comparing the rebased tree with both sides: a file
+only the patches touch must equal `origin/miniship`'s, and one only upstream
+touches must equal the tag's. Every difference was one of the deliberate ones
+below or in `fff0ec8`.
+
+**Upstream fixed four things a patch had fixed first.** Patch 9's pool limits
+and the half of patch 2 in `IsRegistered` are upstream's own now, with the
+same name in one case (`fillPoolDefaults`). Upstream also moved the adapter
+selector after the match, which is patch 12's diagnosis, and serves an
+unreachable entry with an unconnected adapter, which is half of patch 13.
+Where upstream's fix and the patch say the same thing, upstream's line is
+kept and the patch's is gone; where they differ, the patch's behaviour is
+kept and named in patch 25 or `fff0ec8`.
+
+**Expect the start-up tests again.** Upstream asserts what `app.New` dials;
+rest dials nothing, so every such test upstream adds is one rest answers the
+other way.
+
 ## Upstream's tests that do not run here
 
 `integration/suites/...` and parts of `integration/postgres/...` drive a
 deployed `prestd` through upstream's whole route table, and skip unless
 `make test-integration` has started one. They assert routes this fork removes,
-so that target is not run here. In `miniship.yml` they skip, 109 of them, and
-**97** Postgres-backed tests run, measured on a CI runner rather than on a
-developer's machine. The first number is upstream's and moves with
+so that target is not run here. In `miniship.yml` they skip, 201 of them on
+v2.5.2 (109 on v2.4.2), and **147** top-level tests run, measured on a CI
+runner rather than on a developer's machine. The first number is upstream's and moves with
 a rebase; the second is this branch's and moves whenever a patch adds a subject,
 so treat both as the last measurement rather than a promise. `miniship.yml`
 prints them on every run's summary, beside the line
@@ -627,6 +704,7 @@ in the repository's Actions settings, not deleted.
 | `test-unit.yml` | disabled | `miniship.yml` runs the same tests; its coverage-comment jobs need a baseline run on `main` |
 | `test-integration.yml` | disabled | drives a deployed `prestd` through upstream's whole route table, which this fork cuts to two routes |
 | `test-integration-timescaledb.yml` | disabled | the same, against TimescaleDB |
-| `codeql-analysis.yml` | kept | analysis only; it triggers on `main`, so here it runs on its weekly schedule |
+| `test-integration-mysql.yml` | **to disable** | new in v2.5.0; drives `prestd` against MySQL through the catalog routes this fork removes, so it fails on every pull request here (404) |
+| `docker-smoke.yml` | **to disable** | new in v2.5.0; builds upstream's own image and asks it for routes this fork removes, so it fails on a pull request that changes `go.mod` |
 | `lint.yml` | kept | `golangci-lint`, which upstream marks `continue-on-error` |
 | `studio.yml` | kept | checks the Studio frontend when `studio/` changes |

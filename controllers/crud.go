@@ -30,7 +30,6 @@ type CRUDHandler struct {
 	perms    adapters.PermissionsChecker
 	db       adapters.DatabaseRegistry
 	cache    ResponseCacher
-	singleDB bool
 	roles    adapters.AnonymousRoles
 	reader   adapters.RoleReader
 	// miniship: the Databases rest was given, one adapter each. Nil is
@@ -49,6 +48,20 @@ type CRUDHandler struct {
 	userTokens    UserTokenVerifier
 }
 
+func (h *CRUDHandler) ports(r *http.Request) (builder adapters.RequestQueryBuilder, sql adapters.SQLBuilder, executor adapters.QueryExecutor, perms adapters.PermissionsChecker, db adapters.DatabaseRegistry) {
+	if a := GetAdapterForRequest(r, nil); a != nil {
+		return a, a, a, a, a
+	}
+	return h.builder, h.sql, h.executor, h.perms, h.db
+}
+
+func (h *CRUDHandler) bound(r *http.Request) *CRUDHandler {
+	builder, sql, executor, perms, db := h.ports(r)
+	cp := *h
+	cp.builder, cp.sql, cp.executor, cp.perms, cp.db = builder, sql, executor, perms, db
+	return &cp
+}
+
 // servedSchema is the one schema rest serves (miniship). A Project's own
 // tables are in public; every other schema is refused before any SQL.
 const servedSchema = "public"
@@ -62,7 +75,6 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 		perms:    deps.Perms,
 		db:       deps.DB,
 		cache:    deps.Cache,
-		singleDB: deps.SingleDB,
 		roles:    deps.Roles,
 		reader:   deps.Reader,
 		registry: deps.AdapterRegistry,
@@ -86,6 +98,7 @@ func NewCRUDHandler(deps Deps) *CRUDHandler {
 // The Database is chosen here, from the matched route, and the adapter holding
 // it is what the read runs on (miniship-cloud#547).
 func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
@@ -111,6 +124,11 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 	// "cross-database references are not implemented". #547 moved the reader
 	// onto the matched Database's adapter; this is the builder following it.
 	build := h.builderFor(adapter)
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
 
 	if !validatePathSegments(database, schema, table) {
 		jsonError(w, "invalid identifier in path", http.StatusBadRequest)
@@ -227,10 +245,11 @@ func (h *CRUDHandler) Select(w http.ResponseWriter, r *http.Request) {
 		sqlSelect = fmt.Sprint(query, " WHERE ", requestWhere)
 	}
 
-	groupBySQL := h.builder.GroupByClause(r)
+	groupBySQL, groupValues := adapters.GroupByFromRequest(h.builder, r, len(values)+1)
 	if groupBySQL != "" {
 		sqlSelect = fmt.Sprintf("%s %s", sqlSelect, groupBySQL)
 	}
+	values = append(values, groupValues...)
 
 	timeBucketSQL, err := h.builder.TimeBucketClause(r)
 	if err != nil {
@@ -334,6 +353,14 @@ func readFailure(err error, table string) (int, string) {
 		return http.StatusInternalServerError, adapters.ErrRoleNotEntered.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, timeLimitMessage
+	case errors.Is(err, adapters.ErrRelationNotFound):
+		// Upstream's sentinel for a relation that is not there (v2.5.0).
+		return http.StatusNotFound, "no such table"
+	case adapters.IsUnavailable(err):
+		// Upstream's sentinel for a Database it cannot reach, or a pool it
+		// will not open (v2.5.0), which it answers 503. rest answers the
+		// Database not being readable 502, as below (#548).
+		return http.StatusBadGateway, "the Database could not be read"
 	}
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {
@@ -391,10 +418,8 @@ const timeLimitMessage = "the read ran past the time limit and was cancelled; as
 //
 // A Database rest was not given has no adapter, and is not found.
 //
-// With no registry there is upstream's one adapter and upstream's checks on
-// the name, pg.single among them. pg.single is about that shape: it asks
-// whether the name is the one physical database this process connected to, and
-// a registry answers that question by alias instead.
+// With no registry there is upstream's one adapter and upstream's check on
+// the name.
 //
 // A name with no adapter is a miss, and a miss is where rest learns about a
 // Project it was not given (#548): it asks the process holding the Database
@@ -403,7 +428,7 @@ const timeLimitMessage = "the read ran past the time limit and was cancelled; as
 // later calls cause no lookup.
 func (h *CRUDHandler) databaseInPath(ctx context.Context, database string) (adapters.Adapter, error) {
 	if h.registry == nil {
-		if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+		if err := validateDatabase(database, h.db); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -495,13 +520,19 @@ func anonymousRole(roles adapters.AnonymousRoles, database string) (string, bool
 
 // Insert performs an INSERT on a table.
 func (h *CRUDHandler) Insert(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
 
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -524,13 +555,7 @@ func (h *CRUDHandler) Insert(w http.ResponseWriter, r *http.Request) {
 
 	sc := h.executor.InsertCtx(ctx, sql, values...)
 	if err = sc.Err(); err != nil {
-		if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
-			err = fmt.Errorf("relation does not exist: %v", err)
-			jsonError(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		err = fmt.Errorf("could not perform InsertInTables: %v", err)
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeStatementError(w, err, schema, table, "relation does not exist: ", "could not perform InsertInTables: ")
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -539,13 +564,19 @@ func (h *CRUDHandler) Insert(w http.ResponseWriter, r *http.Request) {
 
 // BatchInsert performs a batch INSERT on a table.
 func (h *CRUDHandler) BatchInsert(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
 
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -573,13 +604,7 @@ func (h *CRUDHandler) BatchInsert(w http.ResponseWriter, r *http.Request) {
 		sc = h.executor.BatchInsertCopyCtx(ctx, database, schema, table, strings.Split(names, ","), values...)
 	}
 	if err = sc.Err(); err != nil {
-		if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
-			err = fmt.Errorf("relation does not exist: %v", err)
-			jsonError(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		err = fmt.Errorf("could not perform BatchInsertInTables: %v", err)
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeStatementError(w, err, schema, table, "relation does not exist: ", "could not perform BatchInsertInTables: ")
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -588,13 +613,19 @@ func (h *CRUDHandler) BatchInsert(w http.ResponseWriter, r *http.Request) {
 
 // Delete performs a DELETE on a table.
 func (h *CRUDHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
 
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -631,13 +662,7 @@ func (h *CRUDHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	sc := h.executor.DeleteCtx(ctx, sql, values...)
 	if err = sc.Err(); err != nil {
-		if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
-			err = fmt.Errorf("relation does not exist: %v", err)
-			jsonError(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		err = fmt.Errorf("could not perform DeleteFromTable: %v", err)
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeStatementError(w, err, schema, table, "relation does not exist: ", "could not perform DeleteFromTable: ")
 		return
 	}
 	w.Write(sc.Bytes())
@@ -645,13 +670,19 @@ func (h *CRUDHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // Update performs an UPDATE on a table.
 func (h *CRUDHandler) Update(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
 
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -697,12 +728,18 @@ func (h *CRUDHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	sc := h.executor.UpdateCtx(ctx, sql, values...)
 	if err = sc.Err(); err != nil {
-		if strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table)) {
-			jsonError(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeStatementError(w, err, schema, table, "", "")
 		return
 	}
 	w.Write(sc.Bytes())
+}
+
+func isRelationNotFound(err error, schema, table string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, adapters.ErrRelationNotFound) {
+		return true
+	}
+	return strings.Contains(err.Error(), fmt.Sprintf(`pq: relation "%s.%s" does not exist`, schema, table))
 }

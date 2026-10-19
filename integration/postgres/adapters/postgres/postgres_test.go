@@ -548,8 +548,8 @@ func TestPaginateIfPossible(t *testing.T) {
 		expected    string
 		err         error
 	}{
-		{"Paginate if possible", "/databases?dbname=prest-test&test=cool&_page=1&_page_size=20", "LIMIT 20 OFFSET(1 - 1) * 20", nil},
-		{"?_page negative", "/databases?dbname=prest-test&_page=0", "LIMIT 10 OFFSET(1 - 1) * 10", nil},
+		{"Paginate if possible", "/databases?dbname=prest-test&test=cool&_page=1&_page_size=20", "LIMIT 20 OFFSET 0", nil},
+		{"?_page negative", "/databases?dbname=prest-test&_page=0", "LIMIT 10 OFFSET 0", nil},
 		{"Invalid Paginate if possible", "/databases?dbname=prest-test&test=cool", "", nil},
 	}
 
@@ -866,6 +866,17 @@ func TestJoinByRequest(t *testing.T) {
 		{"Join invalid operator", "/prest-test/public/test?_join=inner:test2:test2.name:notexist:test.name", []string{}, true},
 		{"Join invalid fields", "/prest-test/public/test?_join=inner:0test2:test2.name:notexist:test.name", []string{}, true},
 		{"Join invalid type", "/prest-test/public/test?_join=weird:test2:test2.name:$eq:test.name", []string{}, true},
+		{"Join two distinct tables", "/prest-test/public/test?_join=inner:test2:test2.name:$eq:test.name&_join=left:test3:test3.name:$eq:test.name", []string{"INNER JOIN", `"test2"."name" = "test"."name"`, "LEFT JOIN", `"test3"."name" = "test"."name"`}, false},
+		{"Join the same table twice", "/prest-test/public/test?_join=inner:test2:test2.name:$eq:test.name&_join=left:test2:test2.name:$eq:test.name", []string{}, true},
+		{"Join the same table twice, one clause naming its schema", "/prest-test/public/test?_join=inner:test2:test2.name:$eq:test.name&_join=left:public.test2:test2.name:$eq:test.name", []string{}, true},
+		{"Join a third clause colliding with the first", "/prest-test/public/test?_join=inner:test2:test2.name:$eq:test.name&_join=left:test3:test3.name:$eq:test.name&_join=inner:test2:test2.name:$eq:test.name", []string{}, true},
+		{"Join an empty clause alongside a valid one", "/prest-test/public/test?_join=&_join=inner:test2:test2.name:$eq:test.name", []string{"INNER JOIN", `"test2"."name" = "test"."name"`}, false},
+		// JoinByRequest is not given the queried table, so it cannot see that
+		// this clause names it: the SQL is built here and the request is
+		// refused later, by FieldsPermissions, which does receive it. Pinned so
+		// that split stays deliberate -- see TestJoin_SelfJoinIsRejected in
+		// integration/postgres/controllers for the end-to-end rejection.
+		{"Join the queried table to itself is not JoinByRequest's to catch", "/prest-test/public/test?_join=inner:test:test.name:$eq:test.name", []string{"INNER JOIN", `"test" ON `}, false},
 	}
 
 	for _, tc := range testCases {
@@ -2660,15 +2671,16 @@ func Test_Postgres_GeneratesFuncs(t *testing.T) {
 		{
 			name: "test_DatabaseWhere_Empty",
 			args: args{
+				// An empty config serves no database, so the listing matches none.
 				gotByFunc: pg.DatabaseWhere(""),
-				expect:    statements.DatabasesWhere,
+				expect:    statements.DatabasesWhere + " AND FALSE",
 			},
 		},
 		{
 			name: "test_DatabaseWhere_withRequest",
 			args: args{
 				gotByFunc: pg.DatabaseWhere("testrequestwhere"),
-				expect:    fmt.Sprintf(`%v AND testrequestwhere`, statements.DatabasesWhere),
+				expect:    fmt.Sprintf(`%v AND FALSE AND testrequestwhere`, statements.DatabasesWhere),
 			},
 		},
 		{

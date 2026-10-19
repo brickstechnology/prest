@@ -7,9 +7,11 @@
 [![Homebrew](https://img.shields.io/badge/dynamic/json.svg?url=https://formulae.brew.sh/api/formula/prestd.json&query=$.versions.stable&label=homebrew)](https://formulae.brew.sh/formula/prestd)
 [![Discord](https://img.shields.io/badge/discord-prestd-blue?logo=discord)](https://discord.gg/JnRjvu39w8)
 
-_p_**REST** (**P**_ostgreSQL_ **REST**) is a production-ready API that delivers instant REST and Model Context Protocol (MCP) APIs on top of your **existing or new Postgres** database—CRUD, custom SQL routes, auth, ACL, and a read-only MCP endpoint—without hand-writing a backend.
+_p_**REST** (**P**_ostgreSQL_ **REST**) is a production-ready API that delivers instant REST and Model Context Protocol (MCP) APIs on your existing or new SQL database — CRUD, custom SQL routes, auth, ACL, and a read-only MCP endpoint — without hand-writing a backend.
 
-> PostgreSQL version 9.5 or higher
+PostgreSQL 9.5+ is the default engine. **MySQL 8.0.19+** is a separate native dialect from [v2.5.0](https://docs.prestd.com/releases/v2.5.0). Read-only MCP on MySQL is [v2.5.1](https://docs.prestd.com/releases/v2.5.1). Set `engine = "mysql"` to select it. An unset `engine` stays PostgreSQL. MariaDB, TiDB, and Aurora MySQL stay on the [roadmap](https://docs.prestd.com/databases/roadmap).
+
+> PostgreSQL 9.5+ (default). MySQL 8.0.19+ with `engine = "mysql"`.
 
 Contributor License Agreement — [![CLA assistant](https://cla-assistant.io/readme/badge/prest/prest)](https://cla-assistant.io/prest/prest)
 
@@ -27,7 +29,9 @@ Contributor License Agreement — [![CLA assistant](https://cla-assistant.io/rea
 | MCP over HTTP | [MCP over HTTP](https://docs.prestd.com/get-started/mcp-over-http) |
 | Multi-database | [Multi-database](https://docs.prestd.com/get-started/multi-database) |
 | Databases & roadmap | [Databases](https://docs.prestd.com/databases) · [Roadmap](https://docs.prestd.com/databases/roadmap) |
+| MySQL 8 | [MySQL](https://docs.prestd.com/databases/mysql) · [v2.5.1](https://docs.prestd.com/releases/v2.5.1) |
 | AI clients (Cursor, Claude, …) | [AI and MCP](https://docs.prestd.com/ai) |
+
 ## Quick start
 
 Install and run options (Docker, Homebrew, or Go) are documented in [Get pREST](https://docs.prestd.com/get-prest). Point pREST at Postgres (`PREST_PG_URL` or `pg.*` / `DATABASE_URL`), then call:
@@ -36,7 +40,91 @@ Install and run options (Docker, Homebrew, or Go) are documented in [Get pREST](
 GET /{database}/{schema}/{table}
 ```
 
+MySQL 8.0.19+ uses the same path. `{schema}` is the MySQL database. Set the engine and a `mysql://` URL. The port defaults to 3306 when unset. `PREST_DB_*` is read first, then the legacy `PREST_PG_*` names:
+
+```toml
+engine = "mysql"
+
+[pg]
+url = "mysql://user:pass@localhost:3306/mydb"
+```
+
+```sh
+export PREST_ENGINE=mysql
+export PREST_DB_URL='mysql://user:pass@localhost:3306/mydb'
+```
+
+A missing user or database fails startup. Postgres defaults (user `postgres`, database `prest`, port 5432) are not copied onto a MySQL engine. Guide: [MySQL](https://docs.prestd.com/databases/mysql).
+
 See [Configuring pREST](https://docs.prestd.com/get-started/configuring-prest) for auth, ACL, custom queries, and MCP.
+
+## Serving several databases
+
+pREST can serve multiple databases in two modes:
+
+### Registry mode
+
+Define a `[[databases]]` registry in `prest.toml` or use environment variables (`DATABASE_ALIAS_<n>` / `DATABASE_URL_<n>`). Aliases may differ from database names, and entries can be on the same host or different hosts:
+
+```toml
+[[databases]]
+alias = "main"
+url = "postgres://user:pass@localhost:5432/prest_main?sslmode=disable"
+
+[[databases]]
+alias = "tenant-1"
+url = "postgres://user:pass@localhost:5432/tenant_1?sslmode=disable"
+
+[[databases]]
+alias = "reporting"
+url = "mysql://user:pass@127.0.0.1:3306/reports?tls=false"
+```
+
+Or via environment:
+
+```sh
+DATABASE_ALIAS_1=main
+DATABASE_URL_1="postgres://user:pass@localhost:5432/prest_main?sslmode=disable"
+DATABASE_ALIAS_2=tenant-1
+DATABASE_URL_2="postgres://user:pass@localhost:5432/tenant_1?sslmode=disable"
+```
+
+An entry that is unreachable at start-up is logged and answers 503 ("database unavailable") until it comes up; start-up fails only when every entry is unreachable or the configuration is invalid.
+
+### No-registry mode
+
+Use `pg.database` plus `pg.allowed_databases` on the `[pg]` host with the `[pg]` credentials. Both Postgres and MySQL are supported. On MySQL, `{schema}` must equal `{database}`:
+
+```toml
+[pg]
+database = "prest"
+allowed_databases = ["secondary-db"]
+```
+
+Or via environment (comma-separated for allowed databases):
+
+```sh
+PREST_PG_DATABASE=prest
+PREST_PG_ALLOWED_DATABASES=secondary-db,another-db
+# or for MySQL:
+PREST_DB_DATABASE=mydb
+PREST_DB_ALLOWED_DATABASES=other-db
+```
+
+### Catalog and MCP
+
+The `/databases` endpoint and MCP `prest.list_databases` show only the served databases. In registry mode, that is the configured aliases. Without a registry, that is `pg.database` plus `pg.allowed_databases`.
+
+Postgres supports up to 64 open pools. MySQL creates one pool per served database.
+
+### Migrating from `pg.single`
+
+The `pg.single` configuration key has been removed and is ignored with a warning. Behavior changes:
+
+- **Allow-listed names are always served.** Previously, `pg.single = true` (the default) required requests to be for the main `pg.database`; allow-listed names were ignored. Now they are served whether the deprecated key is set or not.
+- **A registry is no longer limited to `pg.database`.** Previously, with both a registry and `pg.single = true`, every request was restricted to the main database. Now a registry serves its configured aliases freely.
+- **`/databases` and MCP list only served databases.** Requests for unlisted databases return 400 "database not registered".
+- **On MySQL without a registry, `/{database}/{other-schema}/…` returns 404.** On MySQL a schema is a database, so `{schema}` must equal `{database}`. Previously any database the MySQL user had grants on was reachable through `pg.database`.
 
 ## Passing values to query scripts
 
@@ -45,8 +133,8 @@ pREST screens them: anything carrying quotes, `--`, `::`, or — for multi-word
 values — a SQL keyword is refused, and a refused value that is interpolated fails
 the request with `400`.
 
-Bind free-form values instead, and the screen does not apply at all. A bound value
-travels to Postgres out of band, where it can never be parsed as SQL:
+Bind free-form values instead, and the screen does not apply at all. On PostgreSQL,
+a bound value travels to the database out of band, where it can never be parsed as SQL:
 
 ```sql
 -- interpolated: screened, and rejected for values like 'compra do mes'
@@ -61,6 +149,8 @@ SELECT * FROM articles WHERE slug = {{sqlVal "slug"}}
 | `{{sqlVal "key"}}` | a single value | `$1` |
 | `{{sqlList "key"}}` | a repeated query parameter (`?tag=a&tag=b`) | `($1,$2)` |
 | `{{ident "key"}}` | a table/column name, which cannot be bound | `"public"."users"` |
+
+That table is the PostgreSQL rendering. On MySQL, `{{sqlVal "key"}}` renders `?`, `{{sqlList "key"}}` renders `(?,?)`, and `{{ident "key"}}` renders backtick names such as `` `shop`.`users` ``. With the default `prepare = false`, MySQL interpolates those `?` placeholders into the statement. `prepare = true` uses binary prepared statements, and then the values travel out of band.
 
 `sqlVal` and `sqlList` also reach headers as `{{sqlVal "header.X-Application"}}`.
 Credential headers (`Authorization`, `Cookie`, …) are always withheld.
@@ -93,7 +183,7 @@ Run unit tests locally:
 make test-unit
 ```
 
-Run integration suites inside Docker (no local Postgres required):
+Run integration suites inside Docker (no local database required):
 
 ```bash
 # Postgres (full stack: default, auth, multicluster, queries) — also: make test-integration
@@ -101,6 +191,10 @@ make test-integration-postgres
 
 # TimescaleDB (Timescale-specific E2E only)
 make test-integration-timescaledb
+
+# MySQL 8 (./integration/mysql/... only). Default image mysql:8.4.
+# Override: MYSQL_IMAGE=mysql:8.0 make test-integration-mysql
+make test-integration-mysql
 ```
 
 Or with Docker Compose:
@@ -114,6 +208,7 @@ docker compose -f integration/postgres/docker-compose.yml down -v --remove-orpha
 
 Postgres compose runs `./integration/suites/...` and `./integration/postgres/...`.
 TimescaleDB compose runs `./integration/timescaledb/...` only (see `.github/workflows/test-integration-timescaledb.yml`).
+MySQL compose runs `./integration/mysql/...` only (see `.github/workflows/test-integration-mysql.yml`). CI runs `mysql:8.0`, `mysql:8.4`, and `mysql:latest`.
 Network tests require `PREST_TEST_URL` (and flavor-specific URLs for the Postgres job); outside Compose those tests skip when the URLs are unset.
 
 ## Example: Docker Build

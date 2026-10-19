@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/prest/prest/v2/adapters"
+	"github.com/prest/prest/v2/adapters/access"
 	"github.com/prest/prest/v2/adapters/postgres/formatters"
 	"github.com/prest/prest/v2/adapters/postgres/internal/connection"
 	"github.com/prest/prest/v2/adapters/postgres/statements"
@@ -126,7 +127,8 @@ func (p *postgres) PingAll(ctx context.Context) error {
 	return nil
 }
 
-// Aliases returns configured database aliases or the default database name.
+// Aliases returns the served databases: the registry aliases, or without a
+// registry pg.database plus pg.allowed_databases (nil when none).
 func (p *postgres) Aliases() []string {
 	if p.cfg.HasDatabaseRegistry() {
 		aliases := make([]string, 0, len(p.cfg.Databases))
@@ -135,20 +137,18 @@ func (p *postgres) Aliases() []string {
 		}
 		return aliases
 	}
-	if p.cfg.PGDatabase == "" {
-		return nil
+	if served := p.servedDatabases(); len(served) > 0 {
+		return served
 	}
-	return []string{p.cfg.PGDatabase}
+	return nil
 }
 
-// IsRegistered reports whether alias is a configured database registry entry,
-// or, with no registry, the one configured database.
-//
-// miniship: upstream answered true for any name when there is no registry, and
-// the name was then tried as a database on the default host.
+// IsRegistered reports whether alias is a served database.
 func (p *postgres) IsRegistered(alias string) bool {
 	if !p.cfg.HasDatabaseRegistry() {
-		return alias == p.cfg.PGDatabase
+		// Without a registry only the configured database and the explicit
+		// allow-list are reachable; any other name would open a new pool on the host.
+		return slices.Contains(p.servedDatabases(), alias)
 	}
 	_, ok := p.cfg.ProfileByAlias(alias)
 	return ok
@@ -722,7 +722,9 @@ func sliceToJSONList(ifaceSlice interface{}) (returnValue string, err error) {
 // SetByRequest create a set clause for SQL
 func (adapter *postgres) SetByRequest(r *http.Request, initialPlaceholderID int) (setSyntax string, values []interface{}, err error) {
 	body := make(map[string]interface{})
-	if err = json.NewDecoder(r.Body).Decode(&body); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber() // keep integers above 2^53 exact
+	if err = dec.Decode(&body); err != nil {
 		return
 	}
 	defer r.Body.Close()
@@ -775,7 +777,9 @@ func closer(body io.Closer) {
 // ParseBatchInsertRequest create insert SQL to batch request
 func (adapter *postgres) ParseBatchInsertRequest(r *http.Request) (colsName string, placeholders string, values []interface{}, err error) {
 	recordSet := make([]map[string]interface{}, 0)
-	if err = json.NewDecoder(r.Body).Decode(&recordSet); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber() // keep integers above 2^53 exact
+	if err = dec.Decode(&recordSet); err != nil {
 		return
 	}
 	defer closer(r.Body)
@@ -783,34 +787,72 @@ func (adapter *postgres) ParseBatchInsertRequest(r *http.Request) (colsName stri
 		err = ErrBodyEmpty
 		return
 	}
-	recordKeys := adapter.tableKeys(recordSet[0])
+	recordKeys, err := adapter.batchKeys(recordSet)
+	if err != nil {
+		return
+	}
 	colsName = strings.Join(recordKeys, ",")
 	values, placeholders, err = adapter.operationValues(recordSet, recordKeys)
 	return
 }
 
-func (adapter *postgres) operationValues(recordSet []map[string]interface{}, recordKeys []string) (values []interface{}, placeholders string, err error) {
-	for i, record := range recordSet {
-		initPH := len(values) + 1
-		for _, key := range recordKeys {
-			key, err = strconv.Unquote(key)
-			if err != nil {
+// batchKeys returns the sorted union of every record's keys, so a key present
+// only in a later record is not dropped.
+func (adapter *postgres) batchKeys(recordSet []map[string]interface{}) (keys []string, err error) {
+	union := make(map[string]interface{})
+	for _, record := range recordSet {
+		for key := range record {
+			if !ident.IsValid(key) {
+				err = errors.Wrap(ErrInvalidIdentifier, "BatchInsert")
 				return
 			}
-			value := record[key]
+			union[key] = nil
+		}
+	}
+	keys = adapter.tableKeys(union)
+	return
+}
+
+// errCopyRequiresUniformKeys is returned when COPY receives DEFAULT markers:
+// COPY has no DEFAULT keyword, so every record must carry every column.
+var errCopyRequiresUniformKeys = errors.New("copy batch requires every record to have the same keys")
+
+// operationValues renders one VALUES tuple per record over the union of keys.
+// Present keys get the next $n placeholder; a missing key renders DEFAULT (the
+// column default applies, so NOT NULL columns with a default still insert) and
+// an adapters.DefaultValue marker keeps values aligned (len = records*keys).
+// Executors drop the markers before binding.
+func (adapter *postgres) operationValues(recordSet []map[string]interface{}, recordKeys []string) (values []interface{}, placeholders string, err error) {
+	columns := make([]string, len(recordKeys))
+	for i, key := range recordKeys {
+		columns[i], err = strconv.Unquote(key)
+		if err != nil {
+			return
+		}
+	}
+	tuples := make([]string, 0, len(recordSet))
+	placeholderID := 1
+	for _, record := range recordSet {
+		row := make([]string, 0, len(columns))
+		for _, column := range columns {
+			value, ok := record[column]
+			if !ok {
+				row = append(row, "DEFAULT")
+				values = append(values, adapters.DefaultValue{})
+				continue
+			}
 			switch value.(type) {
 			case []interface{}:
 				values = append(values, formatters.FormatArray(value))
 			default:
 				values = append(values, value)
 			}
+			row = append(row, fmt.Sprintf("$%d", placeholderID))
+			placeholderID++
 		}
-		pl := adapter.createPlaceholders(initPH, len(values))
-		placeholders = fmt.Sprintf("%s,%s", placeholders, pl)
-		if i == 0 {
-			placeholders = pl
-		}
+		tuples = append(tuples, "("+strings.Join(row, ",")+")")
 	}
+	placeholders = strings.Join(tuples, ",")
 	return
 }
 
@@ -836,7 +878,9 @@ func (adapter *postgres) createPlaceholders(initial, lenValues int) (ret string)
 // ParseInsertRequest create insert SQL
 func (adapter *postgres) ParseInsertRequest(r *http.Request) (colsName string, colsValue string, values []interface{}, err error) {
 	body := make(map[string]interface{})
-	if err = json.NewDecoder(r.Body).Decode(&body); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber() // keep integers above 2^53 exact
+	if err = dec.Decode(&body); err != nil {
 		return
 	}
 	defer closer(r.Body)
@@ -893,55 +937,92 @@ func (adapter *postgres) SchemaClause(req *http.Request) (query string, hasCount
 	return
 }
 
-// JoinByRequest implements join in queries
+// JoinByRequest implements join in queries. A request may repeat _join, and
+// every clause becomes its own JOIN, in the order it was given.
+//
+// This rejects a table two clauses would both bring in, which needs nothing but
+// the clauses themselves. A clause joining the *queried* table is the same kind
+// of collision but needs to know which table that is, so it is rejected by
+// FieldsPermissions instead, which already receives it.
 func (adapter *postgres) JoinByRequest(r *http.Request) (values []string, err error) {
-	queries := r.URL.Query()
-
-	if queries.Get("_join") == "" {
-		return
+	joined := make(map[string]bool)
+	for _, clause := range r.URL.Query()["_join"] {
+		if clause == "" {
+			continue
+		}
+		var joinQuery, exposed string
+		joinQuery, exposed, err = joinClauseSQL(clause)
+		if err != nil {
+			// One bad clause rejects the whole request; a partial join list
+			// would silently widen the result set.
+			return nil, err
+		}
+		if joined[exposed] {
+			return nil, errDuplicateJoin(exposed)
+		}
+		joined[exposed] = true
+		values = append(values, joinQuery)
 	}
+	return
+}
 
-	joinArgs := strings.Split(queries.Get("_join"), ":")
+// errDuplicateJoin reports a table the statement would name more than once --
+// either joined twice, or joined to the very table being queried. A _join
+// carries no alias, so Postgres would reject it as "table name %q specified
+// more than once"; saying so before the query is built keeps the driver's
+// error off the response.
+func errDuplicateJoin(table string) error {
+	return errors.Wrapf(ErrInvalidJoinClause, "table %q is joined more than once", table)
+}
+
+// joinExposedTable is the name a clause's join target answers to in the rest of
+// the statement: the bare table for "table" and "schema.table", and the whole
+// string for anything else, which joinClauseSQL quotes as a single identifier.
+func joinExposedTable(target string) string {
+	if parts := strings.Split(target, "."); len(parts) == 2 {
+		return parts[1]
+	}
+	return target
+}
+
+// joinClauseSQL turns a single _join value into its JOIN ... ON ... fragment,
+// along with the table name that fragment exposes.
+func joinClauseSQL(clause string) (query, exposed string, err error) {
+	joinArgs := strings.Split(clause, ":")
 
 	if len(joinArgs) != 5 {
-		err = ErrJoinInvalidNumberOfArgs
-		return
+		return "", "", ErrJoinInvalidNumberOfArgs
 	}
 
 	// whitelist join types
 	jt := strings.ToUpper(joinArgs[0])
 	allowed := map[string]bool{"INNER": true, "LEFT": true, "RIGHT": true, "FULL": true, "CROSS": true}
 	if !allowed[jt] {
-		err = ErrInvalidJoinClause
-		return
+		return "", "", ErrInvalidJoinClause
 	}
 
 	if !ident.IsValid(joinArgs[1]) || !ident.IsValid(joinArgs[2]) || !ident.IsValid(joinArgs[4]) {
-		err = ErrInvalidIdentifier
-		return
+		return "", "", ErrInvalidIdentifier
 	}
 
 	op, err := GetQueryOperator(joinArgs[3])
 	if err != nil {
-		return
+		return "", "", err
 	}
 	errJoin := ErrInvalidJoinClause
+	exposed = joinExposedTable(joinArgs[1])
 	if joinWith := strings.Split(joinArgs[1], "."); len(joinWith) == 2 {
 		joinArgs[1] = fmt.Sprintf(`%s"."%s`, joinWith[0], joinWith[1])
 	}
 	spl := strings.Split(joinArgs[2], ".")
 	if len(spl) != 2 {
-		err = errJoin
-		return
+		return "", "", errJoin
 	}
 	splj := strings.Split(joinArgs[4], ".")
 	if len(splj) != 2 {
-		err = errJoin
-		return
+		return "", "", errJoin
 	}
-	joinQuery := fmt.Sprintf(` %s JOIN "%s" ON "%s"."%s" %s "%s"."%s" `, jt, joinArgs[1], spl[0], spl[1], op, splj[0], splj[1])
-	values = append(values, joinQuery)
-	return
+	return fmt.Sprintf(` %s JOIN "%s" ON "%s"."%s" %s "%s"."%s" `, jt, joinArgs[1], spl[0], spl[1], op, splj[0], splj[1]), exposed, nil
 }
 
 // SelectFields query
@@ -1190,6 +1271,9 @@ func (adapter *postgres) PaginateIfPossible(r *http.Request) (paginatedQuery str
 
 // BatchInsertCopy execute batch insert sql into a table unsing copy
 func (adapter *postgres) BatchInsertCopy(dbname, schema, table string, keys []string, values ...interface{}) (sc adapters.Scanner) {
+	if adapters.HasDefaults(values) {
+		return &scanner.PrestScanner{Error: errCopyRequiresUniformKeys}
+	}
 	db, err := adapter.conn.Get()
 	if err != nil {
 		slog.Error("log details", "err", logsafe.Error(err))
@@ -1256,6 +1340,9 @@ func (adapter *postgres) BatchInsertCopy(dbname, schema, table string, keys []st
 
 // BatchInsertCopyCtx execute batch insert sql into a table unsing copy
 func (adapter *postgres) BatchInsertCopyCtx(ctx context.Context, dbname, schema, table string, keys []string, values ...interface{}) (sc adapters.Scanner) {
+	if adapters.HasDefaults(values) {
+		return &scanner.PrestScanner{Error: errCopyRequiresUniformKeys}
+	}
 	db, err := adapter.dbFromCtx(ctx)
 	if err != nil {
 		slog.Error("log details", "err", logsafe.Error(err))
@@ -1333,7 +1420,7 @@ func (adapter *postgres) BatchInsertValues(SQL string, values ...interface{}) (s
 		return &scanner.PrestScanner{Error: err}
 	}
 	jsonData := []byte("[")
-	rows, err := stmt.Query(values...)
+	rows, err := stmt.Query(adapters.BoundValues(values)...)
 	if err != nil {
 		slog.Error("log details", "err", err)
 		return &scanner.PrestScanner{Error: err}
@@ -1376,7 +1463,7 @@ func (adapter *postgres) BatchInsertValuesCtx(ctx context.Context, SQL string, v
 		return &scanner.PrestScanner{Error: err}
 	}
 	jsonData := []byte("[")
-	rows, err := stmt.QueryContext(ctx, values...)
+	rows, err := stmt.QueryContext(ctx, adapters.BoundValues(values)...)
 	if err != nil {
 		slog.Error("log details", "err", err)
 		return &scanner.PrestScanner{Error: err}
@@ -1753,66 +1840,8 @@ func GetQueryOperator(op string) (string, error) {
 }
 
 // TablePermissions get tables permissions based in prest configuration
-func (adapter *postgres) TablePermissions(database, schema, table, op, userName string) (access bool) {
-	restrict := adapter.cfg.AccessConf.Restrict
-	if !restrict {
-		return true
-	}
-
-	for _, ignoreT := range adapter.cfg.AccessConf.IgnoreTable {
-		if ignoreT == table {
-			return true
-		}
-	}
-
-	if t, ok := matchTableConf(adapter.cfg.AccessConf.Tables, database, schema, table); ok {
-		access = slices.Contains(t.Permissions, op)
-	} else {
-		access = false
-	}
-
-	if userName == "" {
-		return access
-	}
-
-	users := adapter.cfg.AccessConf.Users
-	for _, u := range users {
-		if u.Name != userName {
-			continue
-		}
-		if t, ok := matchTableConf(u.Tables, database, schema, table); ok {
-			return slices.Contains(t.Permissions, op)
-		}
-	}
-	return access
-}
-
-func matchTableConf(tables []config.TablesConf, database, schema, table string) (config.TablesConf, bool) {
-	var tableOnly, schemaTable, full *config.TablesConf
-	for i := range tables {
-		t := &tables[i]
-		if t.Name != table {
-			continue
-		}
-		switch {
-		case t.Database == database && t.Schema == schema:
-			full = t
-		case t.Database == "" && t.Schema == schema:
-			schemaTable = t
-		case t.Database == "" && t.Schema == "":
-			tableOnly = t
-		}
-	}
-	if full != nil {
-		return *full, true
-	}
-	if schemaTable != nil {
-		return *schemaTable, true
-	}
-	if tableOnly != nil {
-		return *tableOnly, true
-	}
-	return config.TablesConf{}, false
+func (adapter *postgres) TablePermissions(database, schema, table, op, userName string) bool {
+	return access.TableAllowed(adapter.cfg, database, schema, table, op, userName)
 }
 
 // fieldsByPermission returns a list of fields that a user is allowed to access
@@ -1826,33 +1855,8 @@ func matchTableConf(tables []config.TablesConf, database, schema, table string) 
 // Returns:
 //   - fields: A slice of strings representing the fields the user is allowed to access.
 //     If no specific permissions are found, it defaults to returning all fields ("*").
-func (adapter *postgres) fieldsByPermission(database, schema, table, operation, userName string) (fields []string) {
-	fields = []string{"*"}
-
-	if t, ok := matchTableConf(adapter.cfg.AccessConf.Tables, database, schema, table); ok {
-		for _, perm := range t.Permissions {
-			if perm == operation {
-				fields = t.Fields
-			}
-		}
-	}
-
-	if userName == "" {
-		return
-	}
-
-	users := adapter.cfg.AccessConf.Users
-	for _, u := range users {
-		if u.Name != userName {
-			continue
-		}
-		if t, ok := matchTableConf(u.Tables, database, schema, table); ok &&
-			slices.Contains(t.Permissions, operation) {
-			fields = t.Fields
-		}
-	}
-
-	return
+func (adapter *postgres) fieldsByPermission(database, schema, table, operation, userName string) []string {
+	return access.FieldsFor(adapter.cfg, database, schema, table, operation, userName)
 }
 
 func containsAsterisk(arr []string) bool {
@@ -1881,6 +1885,30 @@ func (adapter *postgres) FieldsPermissions(r *http.Request, database, schema, ta
 		err = fmt.Errorf("error on parse columns from request: %s", err)
 		return
 	}
+	// A _join puts more tables in the FROM clause. Resolving them here, above
+	// the restrict check, serves two purposes: it rejects a join the query
+	// builder could never honour -- one naming the queried table, which
+	// JoinByRequest cannot see -- identically in both restrict modes, and it
+	// gives the restricted branch below the tables whose permitted columns the
+	// select list has to carry. Building that list from the queried table alone
+	// is what made a restricted join return only its own columns (issue #364).
+	targets, err := joinTargetsByRequest(r, schema, table)
+	if err != nil {
+		return nil, err
+	}
+
+	// Control-plane tables (stored queries, auth) are never readable through
+	// data routes, as the queried table or a join target. Runs before the
+	// restrict check so it applies in both restrict modes.
+	if access.ReservedTable(adapter.cfg, table) {
+		return nil, access.ErrReservedTable
+	}
+	for _, target := range targets {
+		if access.ReservedTable(adapter.cfg, target.table) {
+			return nil, access.ErrReservedTable
+		}
+	}
+
 	restrict := adapter.cfg.AccessConf.Restrict
 	if !restrict || op == "delete" {
 		if len(cols) > 0 {
@@ -1891,6 +1919,12 @@ func (adapter *postgres) FieldsPermissions(r *http.Request, database, schema, ta
 		return
 	}
 	allowedFields := adapter.fieldsByPermission(database, schema, table, op, userName)
+
+	if len(targets) > 0 {
+		fields = adapter.joinedFields(database, table, targets, allowedFields, cols, op, userName)
+		return
+	}
+
 	if containsAsterisk(allowedFields) {
 		fields = []string{"*"}
 		if len(cols) > 0 {
@@ -1903,6 +1937,150 @@ func (adapter *postgres) FieldsPermissions(r *http.Request, database, schema, ta
 		fields = allowedFields
 	}
 	return
+}
+
+// joinTarget is the table a _join clause brings into the query.
+type joinTarget struct {
+	schema string
+	table  string
+}
+
+// joinTargetsByRequest resolves the tables referenced by the _join clauses, in
+// request order. A target inherits the queried schema unless it names one, and
+// a table the statement would name twice -- joined twice, or joined to the
+// queried table itself -- is rejected the same way JoinByRequest rejects it, so
+// a request the query builder cannot honour never reaches column resolution. A
+// clause that cannot be resolved at all is left alone: JoinByRequest is the
+// single place that turns _join into SQL and rejects the request there.
+func joinTargetsByRequest(r *http.Request, schema, table string) (targets []joinTarget, err error) {
+	for _, clause := range r.URL.Query()["_join"] {
+		target, ok := joinTargetByClause(clause, schema)
+		if !ok {
+			continue
+		}
+		if target.table == table ||
+			slices.ContainsFunc(targets, func(t joinTarget) bool { return t.table == target.table }) {
+			return nil, errDuplicateJoin(target.table)
+		}
+		targets = append(targets, target)
+	}
+	return
+}
+
+func joinTargetByClause(clause, schema string) (target joinTarget, ok bool) {
+	joinArgs := strings.Split(clause, ":")
+	if len(joinArgs) != 5 {
+		return
+	}
+	parts := strings.Split(joinArgs[1], ".")
+	for _, part := range parts {
+		if !ident.IsValid(part) {
+			return
+		}
+	}
+	switch len(parts) {
+	case 1:
+		return joinTarget{schema: schema, table: parts[0]}, true
+	case 2:
+		return joinTarget{schema: parts[0], table: parts[1]}, true
+	}
+	return
+}
+
+// joinedTable is one table of a joined query and the columns its own
+// permissions allow the caller to read.
+type joinedTable struct {
+	table   string
+	allowed []string
+}
+
+// joinedFields builds the select list of a query that carries a _join: every
+// table contributes only the columns its own permissions allow, qualified with
+// its table name so a column present in more than one of them is never
+// ambiguous. The queried table always comes first.
+func (adapter *postgres) joinedFields(database, table string, targets []joinTarget, allowedFields, cols []string, op, userName string) (fields []string) {
+	tables := make([]joinedTable, 0, len(targets)+1)
+	tables = append(tables, joinedTable{table: table, allowed: allowedFields})
+	for _, target := range targets {
+		var joinAllowed []string
+		if adapter.TablePermissions(database, target.schema, target.table, op, userName) {
+			joinAllowed = adapter.fieldsByPermission(database, target.schema, target.table, op, userName)
+		}
+		tables = append(tables, joinedTable{table: target.table, allowed: joinAllowed})
+	}
+	if len(cols) == 0 {
+		return allJoinedFields(tables)
+	}
+	for _, col := range cols {
+		if col == "*" {
+			fields = append(fields, allJoinedFields(tables)...)
+			continue
+		}
+		if field, permitted := permittedJoinedField(col, tables); permitted {
+			fields = append(fields, field)
+		}
+	}
+	return
+}
+
+// allJoinedFields is the select list of a join without _select: every permitted
+// column of every joined table.
+func allJoinedFields(tables []joinedTable) (fields []string) {
+	for _, t := range tables {
+		fields = append(fields, tableFields(t.table, t.allowed)...)
+	}
+	return
+}
+
+// tableFields renders one side of a join. A table allowed every column yields
+// "<table>.*" rather than a bare "*", which would also expand the other side of
+// the join and defeat its restrictions.
+func tableFields(table string, allowed []string) (fields []string) {
+	if len(allowed) == 0 {
+		return
+	}
+	if containsAsterisk(allowed) {
+		return []string{table + ".*"}
+	}
+	for _, field := range allowed {
+		fields = append(fields, qualifyField(table, field))
+	}
+	return
+}
+
+// permittedJoinedField resolves one _select entry against the joined tables. A
+// qualified entry is checked against the table it names; a bare entry belongs
+// to the queried table, so a joined table's columns must be selected as
+// "<table>.<column>".
+func permittedJoinedField(col string, tables []joinedTable) (field string, permitted bool) {
+	queried := tables[0]
+	if checkField(col, queried.allowed) != "" {
+		return qualifyField(queried.table, col), true
+	}
+	if prefix, name, qualified := strings.Cut(col, "."); qualified && !strings.Contains(name, ".") {
+		for _, t := range tables {
+			if t.table == prefix {
+				return col, permits(t.allowed, name)
+			}
+		}
+		return "", false
+	}
+	return qualifyField(queried.table, col), containsAsterisk(queried.allowed)
+}
+
+// permits reports whether an ACL field list covers field.
+func permits(allowed []string, field string) bool {
+	return containsAsterisk(allowed) || checkField(field, allowed) != ""
+}
+
+// qualifyField prefixes a column with the table it belongs to so it cannot be
+// ambiguous in a join. Anything that is not a plain identifier -- an aggregate,
+// an already qualified column -- is kept as the caller wrote it.
+func qualifyField(table, field string) string {
+	if strings.Contains(field, ".") || !ident.IsValid(field) || !ident.IsValid(table) {
+		return field
+	}
+	return table + "." + field
 }
 
 func checkField(col string, fields []string) (p string) {
@@ -1976,55 +2154,64 @@ func (adapter *postgres) DistinctClause(r *http.Request) (distinctQuery string, 
 	return
 }
 
-// GroupByClause get params in request to add group by clause
+// GroupByClause get params in request to add group by clause.
+// HAVING literals stay interpolated so existing string callers keep working.
 func (adapter *postgres) GroupByClause(r *http.Request) (groupBySQL string) {
-	queries := r.URL.Query()
-	groupQuery := queries.Get("_groupby")
+	groupBy, groupFunc, operator, val, hasVal := groupByParts(r.URL.Query().Get("_groupby"))
+	if !hasVal {
+		return groupBy
+	}
+	// sanitize having value: numeric stays raw, string gets single-quoted and escaped
+	if _, errNum := strconv.ParseFloat(val, 64); errNum == nil {
+		havingQuery := fmt.Sprintf(statements.Having, groupFunc, operator, val)
+		return fmt.Sprintf("%s %s", groupBy, havingQuery)
+	}
+	safe := strings.ReplaceAll(val, "'", "''")
+	havingQuery := fmt.Sprintf(statements.Having, groupFunc, operator, fmt.Sprintf("'%s'", safe))
+	return fmt.Sprintf("%s %s", groupBy, havingQuery)
+}
+
+// GroupByClauseValues binds the HAVING literal as $initialPlaceholderID.
+func (adapter *postgres) GroupByClauseValues(r *http.Request, initialPlaceholderID int) (string, []any) {
+	groupBy, groupFunc, operator, val, hasVal := groupByParts(r.URL.Query().Get("_groupby"))
+	if !hasVal {
+		return groupBy, nil
+	}
+	placeholder := fmt.Sprintf("$%d", initialPlaceholderID)
+	havingQuery := fmt.Sprintf(statements.Having, groupFunc, operator, placeholder)
+	return fmt.Sprintf("%s %s", groupBy, havingQuery), []any{val}
+}
+
+// groupByParts parses _groupby. hasVal is set only when HAVING is valid; val is the raw literal.
+func groupByParts(groupQuery string) (groupBy, groupFunc, operator, val string, hasVal bool) {
 	if groupQuery == "" {
 		return
 	}
-
 	if strings.Contains(groupQuery, "->>having") {
 		params := strings.Split(groupQuery, ":")
 		groupFieldQuery := strings.Split(groupQuery, "->>having")
-
 		fields := strings.Split(groupFieldQuery[0], ",")
 		for i, field := range fields {
 			if !ident.IsValid(field) {
-				return ""
+				return "", "", "", "", false
 			}
 			q, _ := ident.Quote(field)
 			fields[i] = q
 		}
-		groupFieldQuery[0] = strings.Join(fields, ",")
+		groupBy = fmt.Sprintf(statements.GroupBy, strings.Join(fields, ","))
 		if len(params) != 5 {
-			groupBySQL = fmt.Sprintf(statements.GroupBy, groupFieldQuery[0])
-			return
+			return groupBy, "", "", "", false
 		}
-		// groupFunc, field, condition, conditionValue string
-		groupFunc, err := NormalizeGroupFunction(fmt.Sprintf("%s:%s", params[1], params[2]))
+		var err error
+		groupFunc, err = NormalizeGroupFunction(fmt.Sprintf("%s:%s", params[1], params[2]))
 		if err != nil {
-			groupBySQL = fmt.Sprintf(statements.GroupBy, groupFieldQuery[0])
-			return
+			return groupBy, "", "", "", false
 		}
-
-		operator, err := GetQueryOperator(params[3])
+		operator, err = GetQueryOperator(params[3])
 		if err != nil {
-			groupBySQL = fmt.Sprintf(statements.GroupBy, groupFieldQuery[0])
-			return
+			return groupBy, "", "", "", false
 		}
-
-		// sanitize having value: numeric stays raw, string gets single-quoted and escaped
-		val := params[4]
-		if _, errNum := strconv.ParseFloat(val, 64); errNum == nil {
-			havingQuery := fmt.Sprintf(statements.Having, groupFunc, operator, val)
-			groupBySQL = fmt.Sprintf("%s %s", fmt.Sprintf(statements.GroupBy, groupFieldQuery[0]), havingQuery)
-			return
-		}
-		safe := strings.ReplaceAll(val, "'", "''")
-		havingQuery := fmt.Sprintf(statements.Having, groupFunc, operator, fmt.Sprintf("'%s'", safe))
-		groupBySQL = fmt.Sprintf("%s %s", fmt.Sprintf(statements.GroupBy, groupFieldQuery[0]), havingQuery)
-		return
+		return groupBy, groupFunc, operator, params[4], true
 	}
 	fields := strings.Split(groupQuery, ",")
 	for i, field := range fields {
@@ -2033,20 +2220,18 @@ func (adapter *postgres) GroupByClause(r *http.Request) (groupBySQL string) {
 		// If field contains parentheses, treat it as a raw SQL expression (must already be safe).
 		if strings.Contains(field, "(") && strings.Contains(field, ")") {
 			if !isSafeSQLExpression(field) {
-				return ""
+				return "", "", "", "", false
 			}
 			fields[i] = field
 			continue
 		}
 		if !ident.IsValid(field) {
-			return ""
+			return "", "", "", "", false
 		}
 		q, _ := ident.Quote(field)
 		fields[i] = q
 	}
-	groupQuery = strings.Join(fields, ",")
-	groupBySQL = fmt.Sprintf(statements.GroupBy, groupQuery)
-	return
+	return fmt.Sprintf(statements.GroupBy, strings.Join(fields, ",")), "", "", "", false
 }
 
 // TimeBucketClause is not supported in the base postgres adapter.
@@ -2133,6 +2318,14 @@ func sanitizeSelectField(field string) (string, error) {
 	if field == "*" {
 		return "*", nil
 	}
+	// "<table>.*" is how a join asks for every column of one of its tables.
+	if prefix, found := strings.CutSuffix(field, ".*"); found {
+		q, qerr := ident.Quote(prefix)
+		if qerr != nil {
+			return "", errors.Wrapf(ErrInvalidIdentifier, "%s", field)
+		}
+		return q + ".*", nil
+	}
 	if groupFunc, _ := NormalizeGroupFunction(field); groupFunc != "" {
 		return groupFunc, nil // colon-syntax: already validated + quoted
 	}
@@ -2213,9 +2406,13 @@ func (adapter *postgres) UpdateSQL(database string, schema string, table string,
 	return fmt.Sprintf(`UPDATE %s SET %s`, adapter.tableReference(database, schema, table), setSyntax)
 }
 
-// DatabaseWhere generate database where syntax
+// DatabaseWhere generates the catalog WHERE clause. Without a registry it is
+// limited to the served databases so /databases does not list the whole host.
 func (adapter *postgres) DatabaseWhere(requestWhere string) (whereSyntax string) {
 	whereSyntax = statements.DatabasesWhere
+	if served := adapter.servedDatabases(); served != nil {
+		whereSyntax = fmt.Sprint(whereSyntax, " AND ", servedFilter(statements.FieldDatabaseName, served))
+	}
 	if requestWhere != "" {
 		whereSyntax = fmt.Sprint(whereSyntax, " AND ", requestWhere)
 	}

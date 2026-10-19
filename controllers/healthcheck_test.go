@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,6 +40,33 @@ func TestHealthStatus(t *testing.T) {
 	}
 }
 
+func TestHealthHandler_AdapterName(t *testing.T) {
+	t.Parallel()
+
+	mysql := NewHealthHandler(CheckList{healthyDB})
+	mysql.adapterName = "mysql"
+	rec := httptest.NewRecorder()
+	mysql.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_health", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	require.Equal(t, `{"adapter":"mysql"}`, rec.Body.String())
+
+	empty := NewHealthHandler(CheckList{healthyDB})
+	rec = httptest.NewRecorder()
+	empty.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_health", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body, err := io.ReadAll(rec.Body)
+	require.NoError(t, err)
+	require.Empty(t, body)
+
+	down := NewHealthHandler(CheckList{unhealthyDB})
+	down.adapterName = "mysql"
+	rec = httptest.NewRecorder()
+	down.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_health", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.JSONEq(t, `{"error":"database unavailable"}`, rec.Body.String())
+}
+
 func TestReadyStatus(t *testing.T) {
 	t.Parallel()
 
@@ -61,4 +89,20 @@ func TestReadyStatus(t *testing.T) {
 		defer resp.Body.Close()
 		require.Equal(t, tc.want, resp.StatusCode)
 	}
+}
+
+// A failing check answers 503 with a JSON body so clients and probes can tell
+// an outage from an empty response; the driver detail stays in the logs.
+func TestHealthHandler_UnavailableBody(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthHandler(CheckList{unhealthyDB})
+	req := httptest.NewRequest(http.MethodGet, "/_health", nil)
+	req = req.WithContext(withTestTimeout(req.Context()))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"error":"database unavailable"}`, rec.Body.String())
 }

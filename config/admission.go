@@ -164,3 +164,14 @@ func (p *Prest) AdmittedDatabaseConf(alias, connURL, anonRole string) (DatabaseC
 	fillPoolDefaults(&conf, p)
 	return conf, nil
 }
+
+// setAdmissionDefaults sets the lookup's defaults (miniship, #548). They sat
+// in viperCfg beside pg.*'s until upstream moved each section's defaults into
+// a function of its own, so they are one too.
+func setAdmissionDefaults(v *viper.Viper) {
+	v.SetDefault("admission.url", "")
+	v.SetDefault("admission.key", "")
+	v.SetDefault("admission.timeout", DefaultAdmissionTimeout)
+	v.SetDefault("admission.window", DefaultAdmissionWindow)
+	v.SetDefault("admission.max_projects", DefaultAdmissionMaxProjects)
+}

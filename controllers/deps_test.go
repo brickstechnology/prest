@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/prest/prest/v2/adapters/mock"
 	"github.com/prest/prest/v2/adapters/mockgen"
 	"github.com/prest/prest/v2/cache"
 	"github.com/prest/prest/v2/config"
@@ -19,7 +20,6 @@ func TestNewDepsFromConfig(t *testing.T) {
 	adapter := mockgen.NewMockAdapter(ctrl)
 	p := &config.Prest{
 		Adapter:      adapter,
-		SingleDB:     true,
 		PGDatabase:   "prest-test",
 		AuthEnabled:  true,
 		AuthType:     "body",
@@ -36,7 +36,6 @@ func TestNewDepsFromConfig(t *testing.T) {
 	require.Equal(t, adapter, deps.Catalog)
 	require.Equal(t, adapter, deps.DB)
 	require.Equal(t, adapter, deps.Executor)
-	require.True(t, deps.SingleDB)
 	require.Equal(t, "prest-test", deps.PGDatabase)
 	require.NotNil(t, deps.Cache)
 	require.True(t, deps.Auth.Enabled)
@@ -134,4 +133,20 @@ func TestNewHandlers_QueryRegistryWithAdapter(t *testing.T) {
 		DB:            mockgen.NewMockAdapter(ctrl),
 	}, cfg)
 	require.NotNil(t, h.QueryRegistry)
+}
+
+// Dialect is optional: an adapter without it leaves deps.Dialect nil so auth
+// reports ErrAuthDialectMissing instead of panicking.
+func TestNewDepsFromConfig_DialectOptional(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	deps := NewDepsFromConfig(&config.Prest{Adapter: mockgen.NewMockAdapter(ctrl)})
+	require.Nil(t, deps.Dialect)
+
+	withDialect := mock.New(t)
+	deps = NewDepsFromConfig(&config.Prest{Adapter: withDialect})
+	require.Equal(t, withDialect, deps.Dialect)
 }

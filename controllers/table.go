@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/prest/prest/v2/adapters"
@@ -11,27 +10,45 @@ import (
 type TableHandler struct {
 	executor adapters.QueryExecutor
 	db       adapters.DatabaseRegistry
-	singleDB bool
+}
+
+func (h *TableHandler) ports(r *http.Request) (executor adapters.QueryExecutor, db adapters.DatabaseRegistry) {
+	if a := GetAdapterForRequest(r, nil); a != nil {
+		return a, a
+	}
+	return h.executor, h.db
+}
+
+func (h *TableHandler) bound(r *http.Request) *TableHandler {
+	executor, db := h.ports(r)
+	cp := *h
+	cp.executor, cp.db = executor, db
+	return &cp
 }
 
 // NewTableHandler creates a TableHandler.
-func NewTableHandler(executor adapters.QueryExecutor, db adapters.DatabaseRegistry, singleDB bool) *TableHandler {
+func NewTableHandler(executor adapters.QueryExecutor, db adapters.DatabaseRegistry) *TableHandler {
 	return &TableHandler{
 		executor: executor,
 		db:       db,
-		singleDB: singleDB,
 	}
 }
 
 // Show returns information about a table.
 func (h *TableHandler) Show(w http.ResponseWriter, r *http.Request) {
+	h = h.bound(r)
 	vars := pathVars(r)
 	database := vars["database"]
 	schema := vars["schema"]
 	table := vars["table"]
 
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSchema(r, database, schema); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -44,9 +61,14 @@ func (h *TableHandler) Show(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	sc := h.executor.ShowTableCtx(ctx, schema, table)
-	if sc.Err() != nil {
-		errorMessage := fmt.Sprintf("error to execute query, schema error %s", sc.Err())
-		jsonError(w, errorMessage, http.StatusBadRequest)
+	if err := sc.Err(); err != nil {
+		const prefix = "error to execute query, schema error "
+		if status, msg := statusFor(err, schema, table); status == http.StatusNotFound {
+			// /show keeps its historical 400 for a missing table; only CRUD routes answer 404.
+			jsonError(w, prefix+msg, http.StatusBadRequest)
+			return
+		}
+		writeStatementError(w, err, schema, table, prefix, prefix)
 		return
 	}
 	w.Write(sc.Bytes())

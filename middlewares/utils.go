@@ -32,16 +32,27 @@ var (
 // rather than inferred from segment count alone — that used to make any
 // 4-element split fall through to "not a table path" (nil, which
 // AccessControl treats as unenforced), silently skipping TablePermissions on
-// /batch/{database}/{schema}/{table}.
+// /batch/{database}/{schema}/{table}. /show/{database}/{schema}/{table} is
+// stripped the same way so describing a table honours its read permission.
 func getVars(path string) (paths map[string]string) {
 	segments := strings.Split(path, "/")
 	if len(segments) > 0 && segments[0] == "" {
 		segments = segments[1:]
 	}
-	if len(segments) == 4 && segments[0] == "batch" {
+	if len(segments) == 4 && (segments[0] == "batch" || segments[0] == "show") {
 		segments = segments[1:]
 	}
 	if len(segments) != 3 {
+		return nil
+	}
+	// miniship (#1302): /rest/v1/{table} is the Supabase SDK's address, not a
+	// table of a Database called rest in a schema called v1. What a caller may
+	// read there is the Database's own grants and row security, as the role
+	// the read becomes (patch 5). pREST's list is not consulted on it, and so
+	// neither are its reserved control-plane names (GHSA-2x9q-r7j9-g85f): a
+	// Project's own table may be called prest_users, and rest keeps no
+	// control-plane table in a Project's Database to protect.
+	if segments[0] == "rest" && segments[1] == "v1" {
 		return nil
 	}
 	return map[string]string{

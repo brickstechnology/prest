@@ -1,15 +1,20 @@
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"plugin"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/prest/prest/v2/config"
+	"github.com/prest/prest/v2/internal/ident"
+	"github.com/prest/prest/v2/internal/pathsafe"
 
 	"github.com/gorilla/mux"
 	"github.com/urfave/negroni/v3"
@@ -17,12 +22,21 @@ import (
 
 var (
 	jsonErrFormat = `{"error": "%s"}`
+	// ErrInvalidPluginPath is returned when a plugin file or function name is not
+	// a safe single segment, or the resulting library path escapes PluginPath.
+	ErrInvalidPluginPath = errors.New("invalid plugin name")
 )
 
 // LoadedPlugin structure for controlling the loaded plugin
 type LoadedPlugin struct {
 	Loaded bool
-	Plugin *plugin.Plugin
+	Plugin pluginLib
+}
+
+// pluginLib is the subset of *plugin.Plugin used after Open. Tests inject a
+// fake via Plugins.open without building a real .so.
+type pluginLib interface {
+	Lookup(string) (plugin.Symbol, error)
 }
 
 // PluginFuncReturn structure for holding return value and status of plugin function.
@@ -33,12 +47,18 @@ type PluginFuncReturn struct {
 
 // Plugins holds plugin configuration for handler and middleware loading.
 type Plugins struct {
-	cfg *config.Prest
+	cfg  *config.Prest
+	open func(string) (pluginLib, error)
 }
 
 // New creates a Plugins instance for the given config.
 func New(cfg *config.Prest) *Plugins {
-	return &Plugins{cfg: cfg}
+	return &Plugins{
+		cfg: cfg,
+		open: func(path string) (pluginLib, error) {
+			return plugin.Open(path)
+		},
+	}
 }
 
 // loadedFunc global variable to control plugins loaded, blocking duplicate loading
@@ -63,18 +83,56 @@ func pluginInvokeMutex(libPath string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// resolvePluginPath maps a plugin name to its .so path under base. fileName
+// reaches here from the {file} URL segment (or plugin config), so it must be a
+// single safe segment and the joined path must stay inside base, both lexically
+// and after symlinks are resolved. Charset and containment failures wrap
+// ErrInvalidPluginPath; a missing file is a plain error so callers keep
+// treating it as not found.
+func resolvePluginPath(base, fileName string) (string, error) {
+	if !ident.IsSafeSegment(fileName) {
+		return "", fmt.Errorf("%w: file %q", ErrInvalidPluginPath, fileName)
+	}
+	base = filepath.Clean(base)
+	libPath := filepath.Join(base, fileName+".so")
+	if !pathsafe.WithinBase(base, libPath) {
+		return "", fmt.Errorf("%w: file %q escapes plugin path", ErrInvalidPluginPath, fileName)
+	}
+	if _, err := os.Stat(libPath); err != nil {
+		return "", fmt.Errorf("plugin open %s: %w", libPath, err)
+	}
+	// The file exists, so links can now be resolved: a symlink inside base that
+	// targets a library outside it passes the lexical check above.
+	if !pathsafe.ResolvedWithinBase(base, libPath) {
+		return "", fmt.Errorf("%w: file %q resolves outside plugin path", ErrInvalidPluginPath, fileName)
+	}
+	return libPath, nil
+}
+
+// isPluginFuncName reports whether funcName is a plain Go identifier, the only
+// shape that can name an exported plugin handler symbol.
+func isPluginFuncName(funcName string) bool {
+	return ident.IsValid(funcName) && !strings.Contains(funcName, ".")
+}
+
 // loadFunc private func to load and exec OS Library
 func (plg *Plugins) loadFunc(fileName, funcName string, r *http.Request) (ret PluginFuncReturn, err error) {
-	libPath := filepath.Join(plg.cfg.PluginPath, fmt.Sprintf("%s.so", fileName))
+	if !isPluginFuncName(funcName) {
+		return ret, fmt.Errorf("%w: func %q", ErrInvalidPluginPath, funcName)
+	}
+	libPath, err := resolvePluginPath(plg.cfg.PluginPath, fileName)
+	if err != nil {
+		return ret, err
+	}
 
 	loadedFuncMu.Lock()
 	loadedPlugin := loadedFunc[libPath]
 	p := loadedPlugin.Plugin
 	if !loadedPlugin.Loaded {
 		loadedFuncMu.Unlock()
-		p, err = plugin.Open(libPath)
+		p, err = plg.open(libPath)
 		if err != nil {
-			return
+			return ret, fmt.Errorf("plugin open %s: %w", libPath, err)
 		}
 		loadedFuncMu.Lock()
 		if existing, ok := loadedFunc[libPath]; ok && existing.Loaded {
@@ -160,6 +218,13 @@ func (plg *Plugins) Handler() http.HandlerFunc {
 		fileName := vars["file"]
 		funcName := vars["func"]
 		ret, err := plg.loadFunc(fileName, funcName, r)
+		if errors.Is(err, ErrInvalidPluginPath) {
+			// err quotes the rejected names with %q, so control characters in
+			// attacker input cannot forge log lines; the response never echoes them.
+			slog.Warn("rejected plugin request", "err", err)
+			http.Error(w, fmt.Sprintf(jsonErrFormat, ErrInvalidPluginPath.Error()), http.StatusBadRequest)
+			return
+		}
 		if err != nil {
 			slog.Error(err.Error())
 			http.Error(w, fmt.Sprintf(jsonErrFormat, err.Error()), http.StatusNotFound)
@@ -176,16 +241,19 @@ func (plg *Plugins) Handler() http.HandlerFunc {
 }
 
 func (plg *Plugins) loadMiddlewareFunc(fileName, funcName string) (handlerFunc negroni.HandlerFunc, err error) {
-	libPath := filepath.Join(plg.cfg.PluginPath, "middlewares", fmt.Sprintf("%s.so", fileName))
+	libPath, err := resolvePluginPath(filepath.Join(plg.cfg.PluginPath, "middlewares"), fileName)
+	if err != nil {
+		return nil, err
+	}
 
 	loadedMiddlewareMu.Lock()
 	loadedPlugin := loadedMiddlewareFunc[libPath]
 	p := loadedPlugin.Plugin
 	if !loadedPlugin.Loaded {
 		loadedMiddlewareMu.Unlock()
-		p, err = plugin.Open(libPath)
+		p, err = plg.open(libPath)
 		if err != nil {
-			return
+			return nil, fmt.Errorf("plugin open %s: %w", libPath, err)
 		}
 		loadedMiddlewareMu.Lock()
 		if existing, ok := loadedMiddlewareFunc[libPath]; ok && existing.Loaded {
@@ -200,15 +268,33 @@ func (plg *Plugins) loadMiddlewareFunc(fileName, funcName string) (handlerFunc n
 	loadedMiddlewareMu.Unlock()
 	f, err := p.Lookup(fmt.Sprintf("%sMiddlewareLoad", funcName))
 	if err != nil {
-		slog.Error("unable to load middleware plugin function: %s", "funcName", funcName)
+		slog.Error("unable to load middleware plugin function", "funcName", funcName, "err", err)
 		return
 	}
-	handlerFunc, ok := f.(func(rw http.ResponseWriter, rq *http.Request, next http.HandlerFunc))
-	if !ok {
-		slog.Error("it not a negroni middleware function: %s", "funcName", funcName)
+	handlerFunc, err = adaptMiddlewareSymbol(f)
+	if err != nil {
+		slog.Error("it not a negroni middleware function", "funcName", funcName, "err", err)
 		return
 	}
 	return
+}
+
+// adaptMiddlewareSymbol converts a Lookup'd middleware export into a
+// negroni.HandlerFunc. The documented contract is a factory
+// (`func() negroni.Handler`); the legacy direct HandlerFunc shape is still
+// accepted for .so files built against the older assert.
+func adaptMiddlewareSymbol(f any) (negroni.HandlerFunc, error) {
+	if factory, ok := f.(func() negroni.Handler); ok {
+		h := factory()
+		if h == nil {
+			return nil, fmt.Errorf("negroni middleware factory returned nil")
+		}
+		return h.ServeHTTP, nil
+	}
+	if direct, ok := f.(func(rw http.ResponseWriter, rq *http.Request, next http.HandlerFunc)); ok {
+		return negroni.HandlerFunc(direct), nil
+	}
+	return nil, fmt.Errorf("symbol is not a negroni middleware factory or HandlerFunc")
 }
 
 // Middleware loads configured plugin middleware.
@@ -217,7 +303,7 @@ func (plg *Plugins) Middleware() negroni.Handler {
 		for _, plugin := range plg.cfg.PluginMiddlewareList {
 			fn, err := plg.loadMiddlewareFunc(plugin.File, plugin.Func)
 			if err != nil {
-				slog.Error("unable to load middleware plugin function: %s", "funcName", plugin.Func)
+				slog.Error("unable to load middleware plugin function", "funcName", plugin.Func, "err", err)
 				continue
 			}
 			if fn == nil {

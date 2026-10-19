@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
+	"github.com/prest/prest/v2/adapters"
 	"github.com/prest/prest/v2/config"
 	"github.com/prest/prest/v2/internal/logsafe"
 
@@ -99,15 +101,18 @@ func (m *Manager) hasRegistry() bool {
 }
 
 // ErrDatabaseNotGiven is returned for a database name that is neither a
-// registry alias nor the configured default database.
+// registry alias, the configured default database, nor one of
+// pg.allowed_databases.
 var ErrDatabaseNotGiven = errors.New("database not registered")
 
-// GetURI postgres connection URI for a registry alias or the configured
-// default database, and "" for any other name.
+// GetURI postgres connection URI for a registry alias, the configured
+// default database or a name pg.allowed_databases lists, and "" for any other
+// name.
 //
 // miniship: upstream built a URI for any other name too, as a database of that
 // name on the default host, so a path segment could reach every database that
-// host serves. rest connects to the databases it was given and no others.
+// host serves; since v2.5.2 its handlers refuse such a name, and its manager
+// still builds one. rest connects to the databases it was given and no others.
 func (m *Manager) GetURI(name string) string {
 	uri, _ := m.uriFor(name)
 	return uri
@@ -117,13 +122,19 @@ func (m *Manager) uriFor(name string) (string, bool) {
 	if conf, ok := m.cfg.ProfileByAlias(name); ok {
 		return BuildURI(conf, m.cfg), true
 	}
+	dbName := m.cfg.PGDatabase
 	if name != "" && name != m.cfg.PGDatabase {
-		return "", false
+		// pg.allowed_databases are given too: databases on the same host,
+		// reached with the same login (upstream v2.5.0).
+		if !slices.Contains(m.cfg.AllowedDatabases, name) {
+			return "", false
+		}
+		dbName = name
 	}
 
 	dbURI := fmt.Sprintf("user=%s dbname=%s host=%s port=%v sslmode=%v connect_timeout=%d",
 		m.cfg.PGUser,
-		m.cfg.PGDatabase,
+		dbName,
 		m.cfg.PGHost,
 		m.cfg.PGPort,
 		m.cfg.PGSSLMode,
@@ -321,6 +332,18 @@ func (m *Manager) getDatabaseFromPool(name string) *sqlx.DB {
 	return DB
 }
 
+// maxPools caps the distinct connection pools one Manager opens. Callers are
+// expected to validate names first; this guards against one that does not.
+const maxPools = 64
+
+// errTooManyPools wraps adapters.ErrUnavailable so handlers answer 503.
+var errTooManyPools = fmt.Errorf("%w: connection pool limit (%d) reached", adapters.ErrUnavailable, maxPools)
+
+// poolFull reports whether no new pool may be added.
+func (p *Pool) poolFull() bool {
+	return len(p.DB) >= maxPools
+}
+
 // AddDatabaseToPool create and add connection to the pool. A name the
 // manager was not given is refused with ErrDatabaseNotGiven before any
 // connection is attempted.
@@ -338,6 +361,15 @@ func (m *Manager) AddDatabaseToPool(name string) (*sqlx.DB, error) {
 			return DB, nil
 		}
 
+		p := m.getPool()
+		p.Mtx.RLock()
+		full := p.poolFull()
+		p.Mtx.RUnlock()
+		if full {
+			slog.Warn("refusing new database pool: limit reached", "database", name, "limit", maxPools)
+			return nil, errTooManyPools
+		}
+
 		DB, err := dbConnect(m.driverName, WithApplicationName(uri))
 		if err != nil {
 			return nil, err
@@ -349,8 +381,14 @@ func (m *Manager) AddDatabaseToPool(name string) (*sqlx.DB, error) {
 			m.afterConnect(DB.DB)
 		}
 
-		p := m.getPool()
 		p.Mtx.Lock()
+		if p.poolFull() {
+			// Another name filled the last slot while this one connected.
+			p.Mtx.Unlock()
+			_ = DB.Close()
+			slog.Warn("refusing new database pool: limit reached", "database", name, "limit", maxPools)
+			return nil, errTooManyPools
+		}
 		p.DB[uri] = DB
 		p.Mtx.Unlock()
 		return DB, nil

@@ -35,9 +35,10 @@ type MCPHandler struct {
 	catalog  adapters.CatalogQuerier
 	builder  adapters.RequestQueryBuilder
 	executor adapters.QueryExecutor
+	dialect  adapters.Dialect
+	registry adapters.Registry
 	db       adapters.DatabaseRegistry
 	perms    adapters.PermissionsChecker
-	singleDB bool
 	pgDB     string
 	expose   config.ExposeConf
 }
@@ -48,12 +49,36 @@ func NewMCPHandler(deps Deps) *MCPHandler {
 		catalog:  deps.Catalog,
 		builder:  deps.Builder,
 		executor: deps.Executor,
+		dialect:  deps.Dialect,
+		registry: deps.AdapterRegistry,
 		db:       deps.DB,
 		perms:    deps.Perms,
-		singleDB: deps.SingleDB,
 		pgDB:     deps.PGDatabase,
 		expose:   deps.Expose,
 	}
+}
+
+// mcpBackend is the catalog, executor and dialect serving one database alias.
+type mcpBackend struct {
+	catalog  adapters.CatalogQuerier
+	executor adapters.QueryExecutor
+	dialect  adapters.Dialect
+}
+
+// backend returns the adapter registered for database so mixed-engine setups
+// build and run SQL on the right engine. Unregistered aliases and handlers
+// without a registry fall back to the defaults from Deps.
+func (h *MCPHandler) backend(database string) mcpBackend {
+	if a, err := GetAdapterFromRegistry(h.registry, database); err == nil {
+		// Dialect is optional; without it fall back to the default so
+		// selectTable can still report errMCPDialectMissing when both are nil.
+		dialect, ok := a.(adapters.Dialect)
+		if !ok {
+			dialect = h.dialect
+		}
+		return mcpBackend{catalog: a, executor: a, dialect: dialect}
+	}
+	return mcpBackend{catalog: h.catalog, executor: h.executor, dialect: h.dialect}
 }
 
 // Handler returns an http.HandlerFunc for route registration.
@@ -182,7 +207,12 @@ func (h *MCPHandler) handleRPC(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.dispatchRPC(r, req.Method, req.Params)
 	if err != nil {
-		h.writeRPCError(w, req.ID, http.StatusBadRequest, err.Error(), nil)
+		msg, unavailable := publicError(err)
+		status := http.StatusBadRequest
+		if unavailable {
+			status = http.StatusServiceUnavailable
+		}
+		h.writeRPCError(w, req.ID, status, msg, nil)
 		return
 	}
 
@@ -238,11 +268,12 @@ func (h *MCPHandler) dispatchRPC(r *http.Request, method string, params json.Raw
 func (h *MCPHandler) discoveryPayload(r *http.Request) mcpDiscoveryPayload {
 	tools, err := h.tools(r)
 	if err != nil {
+		msg, _ := publicError(err)
 		return mcpDiscoveryPayload{
 			Name:        mcpServerName,
 			Protocol:    mcpProtocolVersion,
 			Endpoint:    r.URL.Path,
-			Description: err.Error(),
+			Description: msg,
 		}
 	}
 
@@ -330,7 +361,10 @@ func (h *MCPHandler) callTool(r *http.Request, params json.RawMessage) (result a
 // errUnauthorizedListing mirrors the message ExposureMiddleware returns for the
 // REST catalog routes, so a caller denied at /databases sees the same refusal
 // through /_mcp.
-var errUnauthorizedListing = fmt.Errorf("unauthorized listing")
+var (
+	errUnauthorizedListing = fmt.Errorf("unauthorized listing")
+	errMCPDialectMissing   = fmt.Errorf("mcp: no SQL dialect configured")
+)
 
 func (h *MCPHandler) listDatabases(r *http.Request) (any, error) {
 	if !h.expose.DatabaseListingAllowed() {
@@ -349,9 +383,11 @@ func (h *MCPHandler) listDatabases(r *http.Request) (any, error) {
 		return rows, nil
 	}
 
-	query, hasCount := h.catalog.DatabaseClause(httptest.NewRequest(http.MethodGet, "/databases", nil))
-	query = fmt.Sprint(query, " ", h.catalog.DatabaseWhere(""), " ", h.catalog.DatabaseOrderBy("", hasCount))
-	return h.queryRows(r, query, h.defaultDatabase())
+	database := h.defaultDatabase()
+	catalog := h.backend(database).catalog
+	query, hasCount := catalog.DatabaseClause(httptest.NewRequest(http.MethodGet, "/databases", nil))
+	query = fmt.Sprint(query, " ", catalog.DatabaseWhere(""), " ", catalog.DatabaseOrderBy("", hasCount))
+	return h.queryRows(r, query, database)
 }
 
 func (h *MCPHandler) listSchemas(r *http.Request, args mcpListSchemasArgs) (any, error) {
@@ -361,12 +397,13 @@ func (h *MCPHandler) listSchemas(r *http.Request, args mcpListSchemasArgs) (any,
 	if args.Database == "" {
 		args.Database = h.defaultDatabase()
 	}
-	if err := validateDatabase(args.Database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(args.Database, h.db); err != nil {
 		return nil, err
 	}
 
-	query, hasCount := h.catalog.SchemaClause(httptest.NewRequest(http.MethodGet, "/schemas", nil))
-	query = fmt.Sprint(query, " ", h.catalog.SchemaOrderBy("", hasCount))
+	catalog := h.backend(args.Database).catalog
+	query, hasCount := catalog.SchemaClause(httptest.NewRequest(http.MethodGet, "/schemas", nil))
+	query = fmt.Sprint(query, " ", catalog.SchemaOrderBy("", hasCount))
 
 	var (
 		result  any
@@ -412,11 +449,20 @@ func (h *MCPHandler) listTables(r *http.Request, args mcpListTablesArgs) (any, e
 	if args.Database == "" {
 		args.Database = h.defaultDatabase()
 	}
-	if err := validateDatabase(args.Database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(args.Database, h.db); err != nil {
 		return nil, err
 	}
 	if args.Schema != "" && !validatePathSegments(args.Schema) {
 		return nil, fmt.Errorf("invalid identifier in path")
+	}
+	if args.Schema != "" {
+		// Same pin as validateToolTarget: a MySQL entry lists only its own
+		// database's tables.
+		if a, err := GetAdapterFromRegistry(h.registry, args.Database); err == nil {
+			if err := checkSchemaScope(a, args.Database, args.Schema); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return h.tableRows(r, args.Database, args.Schema)
 }
@@ -489,20 +535,32 @@ func (h *MCPHandler) selectTable(r *http.Request, args mcpSelectArgs) (any, erro
 		}
 	}
 
+	b := h.backend(args.Database)
+	if b.dialect == nil {
+		return nil, errMCPDialectMissing
+	}
 	quotedColumns := make([]string, 0, len(selectedColumns))
 	for _, name := range selectedColumns {
-		quotedColumns = append(quotedColumns, quotePathSegment(name))
+		quoted, err := b.dialect.QuoteIdentifier(name)
+		if err != nil {
+			return nil, err
+		}
+		quotedColumns = append(quotedColumns, quoted)
+	}
+	tableRef, err := b.dialect.QuoteIdentifier(args.Schema + "." + args.Table)
+	if err != nil {
+		return nil, err
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(quotedColumns, ", "), quotePathSegment(args.Schema), quotePathSegment(args.Table))
-	whereClause, values, err := buildFilterClause(args.Filters, columnSet)
+	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(quotedColumns, ", "), tableRef)
+	whereClause, values, err := buildFilterClause(b.dialect, args.Filters, columnSet)
 	if err != nil {
 		return nil, err
 	}
 	if whereClause != "" {
 		query = fmt.Sprintf("%s WHERE %s", query, whereClause)
 	}
-	orderClause, err := buildOrderClause(args.OrderBy, columnSet)
+	orderClause, err := buildOrderClause(b.dialect, args.OrderBy, columnSet)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +572,7 @@ func (h *MCPHandler) selectTable(r *http.Request, args mcpSelectArgs) (any, erro
 	ctx, cancel := requestContext(r, args.Database)
 	defer cancel()
 
-	sc := h.executor.QueryCtx(ctx, query, values...)
+	sc := b.executor.QueryCtx(ctx, query, values...)
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("select table failed: %w", err)
 	}
@@ -617,7 +675,7 @@ func (h *MCPHandler) columnsByTable(r *http.Request, database string) (map[strin
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	sc := h.executor.ShowColumnsCtx(ctx)
+	sc := h.backend(database).executor.ShowColumnsCtx(ctx)
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("list columns failed: %w", err)
 	}
@@ -652,7 +710,7 @@ func (h *MCPHandler) describeColumns(r *http.Request, database, schema, table st
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	sc := h.executor.ShowTableCtx(ctx, schema, table)
+	sc := h.backend(database).executor.ShowTableCtx(ctx, schema, table)
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("describe table failed: %w", err)
 	}
@@ -699,11 +757,12 @@ func (h *MCPHandler) rawTableRows(r *http.Request, database, schema string) ([]m
 		query  string
 		values []interface{}
 	)
+	catalog := h.backend(database).catalog
 	if schema != "" {
-		query = fmt.Sprint(h.catalog.SchemaTablesClause(), h.catalog.SchemaTablesWhere(""), h.catalog.SchemaTablesOrderBy(""))
+		query = fmt.Sprint(catalog.SchemaTablesClause(), catalog.SchemaTablesWhere(""), catalog.SchemaTablesOrderBy(""))
 		values = []interface{}{database, schema}
 	} else {
-		query = fmt.Sprint(h.catalog.TableClause(), " ", h.catalog.TableWhere(""), " ", h.catalog.TableOrderBy(""))
+		query = fmt.Sprint(catalog.TableClause(), " ", catalog.TableWhere(""), " ", catalog.TableOrderBy(""))
 	}
 	result, err := h.queryRows(r, query, database, values...)
 	if err != nil {
@@ -720,7 +779,7 @@ func (h *MCPHandler) queryRows(r *http.Request, query string, database string, v
 	ctx, cancel := requestContext(r, database)
 	defer cancel()
 
-	sc := h.executor.QueryCtx(ctx, query, values...)
+	sc := h.backend(database).executor.QueryCtx(ctx, query, values...)
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
@@ -831,41 +890,24 @@ func (h *MCPHandler) validateToolTarget(database, schema, table string) error {
 	if database == "" {
 		database = h.defaultDatabase()
 	}
-	if err := validateDatabase(database, h.db, h.singleDB); err != nil {
+	if err := validateDatabase(database, h.db); err != nil {
 		return err
 	}
 	if !validatePathSegments(database, schema, table) {
 		return fmt.Errorf("invalid identifier in path")
 	}
+	if a, err := GetAdapterFromRegistry(h.registry, database); err == nil {
+		return checkSchemaScope(a, database, schema)
+	}
 	return nil
 }
 
 func (h *MCPHandler) physicalDatabase(alias string) string {
-	if h.db == nil {
-		return alias
-	}
-	return h.db.PhysicalName(alias)
+	return physicalName(h.db, alias)
 }
 
 func (h *MCPHandler) databaseAliases() []string {
-	if h.singleDB {
-		database := h.defaultDatabase()
-		if database == "" {
-			return nil
-		}
-		return []string{database}
-	}
-	if h.db != nil {
-		aliases := uniqueStrings(h.db.Aliases())
-		if len(aliases) > 0 {
-			return aliases
-		}
-	}
-	database := h.defaultDatabase()
-	if database == "" {
-		return nil
-	}
-	return []string{database}
+	return registryAliases(h.db, h.defaultDatabase())
 }
 
 func (h *MCPHandler) defaultDatabase() string {
@@ -987,10 +1029,6 @@ func intValue(value any) int {
 	default:
 		return 0
 	}
-}
-
-func quotePathSegment(segment string) string {
-	return `"` + strings.ReplaceAll(segment, `"`, `""`) + `"`
 }
 
 func emptyObjectSchema() map[string]any {
@@ -1139,7 +1177,7 @@ func nullableSchema(schema map[string]any) map[string]any {
 	return map[string]any{"anyOf": []any{schema, map[string]any{"type": "null"}}}
 }
 
-func buildFilterClause(filters map[string]any, columns map[string]mcpColumn) (string, []interface{}, error) {
+func buildFilterClause(dialect adapters.Dialect, filters map[string]any, columns map[string]mcpColumn) (string, []interface{}, error) {
 	if len(filters) == 0 {
 		return "", nil, nil
 	}
@@ -1157,7 +1195,10 @@ func buildFilterClause(filters map[string]any, columns map[string]mcpColumn) (st
 		if !ok {
 			return "", nil, fmt.Errorf("unsupported filter column: %s", key)
 		}
-		quoted := quotePathSegment(col.Name)
+		quoted, err := dialect.QuoteIdentifier(col.Name)
+		if err != nil {
+			return "", nil, err
+		}
 		value := filters[key]
 		if value == nil {
 			clauses = append(clauses, fmt.Sprintf("%s IS NULL", quoted))
@@ -1169,21 +1210,21 @@ func buildFilterClause(filters map[string]any, columns map[string]mcpColumn) (st
 			}
 			placeholders := make([]string, 0, len(arr))
 			for _, item := range arr {
-				placeholders = append(placeholders, fmt.Sprintf("$%d", index))
+				placeholders = append(placeholders, dialect.Placeholder(index))
 				values = append(values, item)
 				index++
 			}
 			clauses = append(clauses, fmt.Sprintf("%s IN (%s)", quoted, strings.Join(placeholders, ", ")))
 			continue
 		}
-		clauses = append(clauses, fmt.Sprintf("%s = $%d", quoted, index))
+		clauses = append(clauses, fmt.Sprintf("%s = %s", quoted, dialect.Placeholder(index)))
 		values = append(values, value)
 		index++
 	}
 	return strings.Join(clauses, " AND "), values, nil
 }
 
-func buildOrderClause(orderBy []string, columns map[string]mcpColumn) (string, error) {
+func buildOrderClause(dialect adapters.Dialect, orderBy []string, columns map[string]mcpColumn) (string, error) {
 	if len(orderBy) == 0 {
 		return "", nil
 	}
@@ -1198,7 +1239,11 @@ func buildOrderClause(orderBy []string, columns map[string]mcpColumn) (string, e
 		if _, ok := columns[name]; !ok {
 			return "", fmt.Errorf("unsupported order column: %s", name)
 		}
-		parts = append(parts, fmt.Sprintf("%s %s", quotePathSegment(name), direction))
+		quoted, err := dialect.QuoteIdentifier(name)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", quoted, direction))
 	}
 	return "ORDER BY " + strings.Join(parts, ", "), nil
 }

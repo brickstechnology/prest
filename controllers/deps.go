@@ -29,6 +29,7 @@ type Deps struct {
 	Builder         adapters.RequestQueryBuilder
 	Executor        adapters.QueryExecutor
 	SQL             adapters.SQLBuilder
+	Dialect         adapters.Dialect
 	Perms           adapters.PermissionsChecker
 	Scripts         adapters.ScriptRunner
 	QueryRegistry   adapters.QueryRegistry
@@ -38,7 +39,8 @@ type Deps struct {
 	Readiness       adapters.ReadinessChecker
 	Cache           ResponseCacher
 	AdapterRegistry adapters.Registry // Multi-database adapter registry
-	SingleDB        bool
+	AdapterName     string            // Default engine name reported by /_health
+	RegistryMode    bool              // [[databases]] configured: aliases come from AdapterRegistry
 	PGDatabase      string
 	Auth            AuthConfig
 	Expose          config.ExposeConf
@@ -81,11 +83,17 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 	if perms, ok := p.Adapter.(adapters.ScriptPermissionsChecker); ok {
 		scriptPerms = perms
 	}
+	// Dialect is optional; nil makes auth return ErrAuthDialectMissing.
+	var dialect adapters.Dialect
+	if d, ok := p.Adapter.(adapters.Dialect); ok {
+		dialect = d
+	}
 	return Deps{
 		Catalog:       p.Adapter,
 		Builder:       p.Adapter,
 		Executor:      p.Adapter,
 		SQL:           p.Adapter,
+		Dialect:       dialect,
 		Perms:         p.Adapter,
 		Scripts:       p.Adapter,
 		QueryRegistry: queryRegistry,
@@ -97,7 +105,7 @@ func NewDepsFromConfig(p *config.Prest) Deps {
 		Pinger:        p.Adapter,
 		Readiness:     p.Adapter,
 		Cache:         cacher,
-		SingleDB:      p.SingleDB,
+		RegistryMode:  p.HasDatabaseRegistry(),
 		PGDatabase:    p.PGDatabase,
 		Expose:        p.ExposeConf,
 		Auth: AuthConfig{
@@ -129,14 +137,16 @@ type Handlers struct {
 // NewHandlers constructs handlers from dependencies.
 func NewHandlers(deps Deps, cfg *config.Prest) *Handlers {
 	checks := DefaultCheckList(deps.Pinger)
+	health := NewHealthHandler(checks)
+	health.adapterName = deps.AdapterName
 	h := &Handlers{
-		Auth:    NewAuthHandler(deps.Executor, deps.Auth),
+		Auth:    NewAuthHandler(deps.Executor, deps.Dialect, deps.Auth),
 		Catalog: NewCatalogHandler(deps),
 		MCP:     NewMCPHandler(deps),
-		Table:   NewTableHandler(deps.Executor, deps.DB, deps.SingleDB),
+		Table:   NewTableHandler(deps.Executor, deps.DB),
 		CRUD:    NewCRUDHandler(deps),
 		Script:  NewScriptHandler(deps),
-		Health:  NewHealthHandler(checks),
+		Health:  health,
 		Ready:   NewHealthHandler(DefaultReadyCheckList(deps.Readiness)),
 	}
 	if cfg != nil && deps.QueryRegistry != nil && cfg.QueriesConf.RegisterEnabled && cfg.QueriesConf.Storage == config.QueriesStorageDatabase {

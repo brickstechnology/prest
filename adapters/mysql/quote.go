@@ -1,0 +1,80 @@
+package mysql
+
+import (
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/prest/prest/v2/internal/ident"
+)
+
+func quoteIdent(s string) (string, error) {
+	if strings.Contains(s, ".") {
+		parts := strings.Split(s, ".")
+		out := make([]string, len(parts))
+		for i, part := range parts {
+			q, err := quoteIdent(part)
+			if err != nil {
+				return "", err
+			}
+			out[i] = q
+		}
+		return strings.Join(out, "."), nil
+	}
+	if !ident.IsValid(s) && !ident.IsSafeSegment(s) {
+		return "", fmt.Errorf("%w: %s", errInvalidIdentifier, s)
+	}
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`", nil
+}
+
+// quoteLiteral renders s as one single-quoted MySQL string literal, escaping
+// backslashes and single quotes. Only for config values, never request input.
+func quoteLiteral(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// servedFilter restricts field to names, inlined as literals so the request
+// filter's "?" placeholders keep their order. No names yields 1=0.
+func servedFilter(field string, names []string) string {
+	if len(names) == 0 {
+		return "1=0"
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = quoteLiteral(n)
+	}
+	return field + " IN (" + strings.Join(quoted, ", ") + ")"
+}
+
+func mustQuote(s string) string {
+	q, err := quoteIdent(s)
+	if err != nil {
+		return ""
+	}
+	return q
+}
+
+// placeholders returns n question-mark placeholders wrapped in parentheses.
+// initial is ignored for the text; it only preserves the caller's value order.
+func placeholders(initial, lenValues int) (string, error) {
+	if initial < 1 || lenValues < initial {
+		return "", fmt.Errorf("invalid placeholder count")
+	}
+	n := lenValues - initial
+	if n == math.MaxInt {
+		return "", fmt.Errorf("invalid placeholder count")
+	}
+	n++
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "?"
+	}
+	return "(" + strings.Join(parts, ",") + ")", nil
+}
+
+// QuoteIdentifier implements adapters.Dialect with backtick quoting.
+func (a *Adapter) QuoteIdentifier(name string) (string, error) { return quoteIdent(name) }
+
+// Placeholder implements adapters.Dialect; MySQL binds are positional "?".
+func (a *Adapter) Placeholder(int) string { return "?" }

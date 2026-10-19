@@ -14,6 +14,10 @@ for db in $DATABASES; do
     psql -h "$PREST_PG_HOST" -p "$PREST_PG_PORT" -U "$PREST_PG_USER" -d "$db" -f ./testdata/schema.sql
 done
 
+echo -e "\n\n.:: POSTGRES: MARKER TABLE ONLY IN secondary-db"
+psql -h "$PREST_PG_HOST" -p "$PREST_PG_PORT" -U "$PREST_PG_USER" -d secondary-db -c \
+    "CREATE TABLE public.only_in_secondary (id serial PRIMARY KEY, name text); INSERT INTO public.only_in_secondary (name) VALUES ('secondary');"
+
 if [ -n "${PREST_PG_HOST_B:-}" ]; then
     echo -e "\n\n.:: POSTGRES-B: PROVISION SECONDARY CLUSTER DATABASE $SECONDARY_CLUSTER_DB"
     psql -h "$PREST_PG_HOST_B" -p "${PREST_PG_PORT:-5432}" -U "$PREST_PG_USER" -d "$SECONDARY_CLUSTER_DB" -f ./testdata/schema.sql
@@ -23,7 +27,13 @@ echo -e "\n\n.:: GOLANG: DOWNLOAD MODULES"
 go mod download
 
 echo -e "\n\n.:: PRESTD: PLUGIN BUILD"
-go build -o ./lib/hello.so -buildmode=plugin ./lib/src/hello.go
+PLUGIN_FLAGS=(-buildmode=plugin -trimpath -ldflags "-s -w")
+if [ -d ./vendor ]; then
+    PLUGIN_FLAGS=(-mod=vendor "${PLUGIN_FLAGS[@]}")
+fi
+go build "${PLUGIN_FLAGS[@]}" -o ./lib/hello.so ./lib/src/hello.go
+mkdir -p ./lib/middlewares
+go build "${PLUGIN_FLAGS[@]}" -o ./lib/middlewares/hello.so ./lib/src/middlewares/hello.go
 
 mkdir -p ./testdata/queries
 chmod -R u+w ./testdata/queries

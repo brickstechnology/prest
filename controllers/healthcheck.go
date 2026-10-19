@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,7 +20,8 @@ type CheckList []HealthCheckFunc
 
 // HealthHandler serves the health check endpoint.
 type HealthHandler struct {
-	checks CheckList
+	checks      CheckList
+	adapterName string
 }
 
 // NewHealthHandler creates a HealthHandler.
@@ -35,11 +37,19 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, check := range h.checks {
 		if err := check(ctx); err != nil {
 			slog.Error("could not check DB connection", "err", logsafe.Error(err))
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, jsonErrorMsg, unavailableMsg)
 			return
 		}
 	}
+	if h.adapterName == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"adapter":%q}`, h.adapterName)
 }
 
 // Handler returns an http.HandlerFunc for route registration.

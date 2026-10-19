@@ -162,7 +162,6 @@ func restOverProjects(t *testing.T, cfg *config.Prest) *httptest.Server {
 	t.Helper()
 	conf := *cfg
 	conf.Adapter = nil
-	conf.SingleDB = false
 	conf.Debug = false
 	conf.EnableDefaultJWT = false
 	conf.AuthEnabled = false

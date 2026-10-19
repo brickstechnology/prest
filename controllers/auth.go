@@ -5,13 +5,16 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/prest/prest/v2/adapters"
 	"github.com/prest/prest/v2/controllers/auth"
+	"github.com/prest/prest/v2/internal/logsafe"
 	"golang.org/x/crypto/bcrypt"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -43,13 +46,16 @@ type Login struct {
 // AuthHandler serves the authentication endpoint.
 type AuthHandler struct {
 	executor adapters.QueryExecutor
+	dialect  adapters.Dialect
 	cfg      AuthConfig
 }
 
-// NewAuthHandler creates an AuthHandler.
-func NewAuthHandler(executor adapters.QueryExecutor, cfg AuthConfig) *AuthHandler {
+// NewAuthHandler creates an AuthHandler. dialect quotes the auth table and
+// columns and supplies bind placeholders for the configured engine.
+func NewAuthHandler(executor adapters.QueryExecutor, dialect adapters.Dialect, cfg AuthConfig) *AuthHandler {
 	return &AuthHandler{
 		executor: executor,
+		dialect:  dialect,
 		cfg:      cfg,
 	}
 }
@@ -74,7 +80,16 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	loggedUser, err := h.basicPasswordCheck(strings.ToLower(login.Username), login.Password)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusUnauthorized)
+		switch {
+		case adapters.IsUnavailable(err):
+			writeStatementError(w, err, "", "", "", "")
+		case errors.Is(err, ErrUserNotFound):
+			jsonError(w, err.Error(), http.StatusUnauthorized)
+		default:
+			// Raw SQL/driver text must not reach the client.
+			slog.Error("login failed", "err", logsafe.Error(err))
+			jsonError(w, "authentication failed", http.StatusUnauthorized)
+		}
 		return
 	}
 	token, err := h.token(loggedUser)
@@ -134,7 +149,11 @@ func (h *AuthHandler) basicPasswordCheckLegacy(user, password string) (obj auth.
 	if err != nil {
 		return
 	}
-	sc := h.executor.Query(h.selectQuery(), user, digest)
+	query, err := h.selectQuery()
+	if err != nil {
+		return
+	}
+	sc := h.executor.Query(query, user, digest)
 	if sc.Err() != nil {
 		err = sc.Err()
 		return
@@ -150,7 +169,11 @@ func (h *AuthHandler) basicPasswordCheckLegacy(user, password string) (obj auth.
 }
 
 func (h *AuthHandler) basicPasswordCheckBcrypt(user, password string) (obj auth.User, err error) {
-	sc := h.executor.Query(h.selectQueryByUsername(), user)
+	query, err := h.selectQueryByUsername()
+	if err != nil {
+		return
+	}
+	sc := h.executor.Query(query, user)
 	if sc.Err() != nil {
 		err = sc.Err()
 		return
@@ -239,18 +262,37 @@ func (r loginRow) user() auth.User {
 	}
 }
 
-func (h *AuthHandler) selectQueryByUsername() string {
-	return fmt.Sprintf(
-		`SELECT * FROM %s.%s WHERE %s=$1 LIMIT 1`,
-		h.cfg.Schema, h.cfg.Table,
-		h.cfg.Username)
+func (h *AuthHandler) selectQueryByUsername() (string, error) {
+	return h.lookupQuery(false)
 }
 
-func (h *AuthHandler) selectQuery() (query string) {
-	return fmt.Sprintf(
-		`SELECT * FROM %s.%s WHERE %s=$1 AND %s=$2 LIMIT 1`,
-		h.cfg.Schema, h.cfg.Table,
-		h.cfg.Username, h.cfg.Password)
+func (h *AuthHandler) selectQuery() (string, error) {
+	return h.lookupQuery(true)
+}
+
+// lookupQuery builds the user lookup with the adapter's quoting and binds,
+// matching on username and, for legacy digests, the stored password.
+func (h *AuthHandler) lookupQuery(withPassword bool) (string, error) {
+	if h.dialect == nil {
+		return "", ErrAuthDialectMissing
+	}
+	table, err := h.dialect.QuoteIdentifier(h.cfg.Schema + "." + h.cfg.Table)
+	if err != nil {
+		return "", err
+	}
+	username, err := h.dialect.QuoteIdentifier(h.cfg.Username)
+	if err != nil {
+		return "", err
+	}
+	where := fmt.Sprintf("%s=%s", username, h.dialect.Placeholder(1))
+	if withPassword {
+		password, err := h.dialect.QuoteIdentifier(h.cfg.Password)
+		if err != nil {
+			return "", err
+		}
+		where += fmt.Sprintf(" AND %s=%s", password, h.dialect.Placeholder(2))
+	}
+	return fmt.Sprintf("SELECT * FROM %s WHERE %s LIMIT 1", table, where), nil
 }
 
 func (h *AuthHandler) legacyDigest(password string) (string, error) {
@@ -283,6 +325,6 @@ func HashPassword(password string) (string, error) {
 
 // Token creates a JWT for the given user (legacy helper for tests).
 func Token(u auth.User, jwtKey string) (t string, err error) {
-	h := NewAuthHandler(nil, AuthConfig{JWTKey: jwtKey})
+	h := NewAuthHandler(nil, nil, AuthConfig{JWTKey: jwtKey})
 	return h.token(u)
 }

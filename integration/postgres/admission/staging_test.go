@@ -283,7 +283,6 @@ func restGiven(t *testing.T, cfg *config.Prest, answers *answerer, given []proje
 	t.Helper()
 	conf := *cfg
 	conf.Adapter = nil
-	conf.SingleDB = false
 	conf.Debug = false
 	conf.EnableDefaultJWT = false
 	conf.AuthEnabled = false

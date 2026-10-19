@@ -329,7 +329,6 @@ func restWithAnswerer(t *testing.T, answers *answerer, given map[string]*countin
 		PGConnTimeout: 2,
 		PGMaxOpenConn: 1,
 		JSONAggType:   "jsonb_agg",
-		SingleDB:      false,
 		AccessConf:    config.AccessConf{Restrict: false},
 		Admission: config.AdmissionConf{
 			URL:         answers.server.URL,

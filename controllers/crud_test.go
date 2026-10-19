@@ -158,6 +158,54 @@ func TestCRUDHandler_Select_Success(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "prest")
 }
 
+func TestCRUDHandler_Select_UsesContextAdapter(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	selected := mockgen.NewMockAdapter(ctrl)
+	selected.EXPECT().IsRegistered("prest-test").Return(true)
+	selected.EXPECT().FieldsPermissions(gomock.Any(), "prest-test", "public", "test", "read", "").Return([]string{"name"}, nil)
+	selected.EXPECT().SelectFields([]string{"name"}).Return(`"name"`, nil)
+	selected.EXPECT().SelectSQL(`"name"`, "prest-test", "public", "test").Return(`SELECT "name" FROM "prest-test"."public"."test"`)
+	selected.EXPECT().DistinctClause(gomock.Any()).Return("", nil)
+	selected.EXPECT().CountByRequest(gomock.Any()).Return("", nil)
+	selected.EXPECT().JoinByRequest(gomock.Any()).Return(nil, nil)
+	selected.EXPECT().WhereByRequest(gomock.Any(), 1).Return("", nil, nil)
+	selected.EXPECT().GroupByClause(gomock.Any()).Return("")
+	selected.EXPECT().TimeBucketClause(gomock.Any()).Return("", nil)
+	selected.EXPECT().OrderByRequest(gomock.Any()).Return("", nil)
+	selected.EXPECT().PaginateIfPossible(gomock.Any()).Return("", nil)
+
+	scanner := mockgen.NewMockScanner(ctrl)
+	scanner.EXPECT().Err().Return(nil)
+	scanner.EXPECT().Bytes().Return([]byte(`[{"name":"prest"}]`))
+	selected.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
+
+	h := NewCRUDHandler(Deps{
+		// miniship: the read becomes the anonymous role (patch 5), and the
+		// context's adapter is what it reads on.
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(selected),
+		Perms:    mockgen.NewMockPermissionsChecker(ctrl),
+		SQL:      mockgen.NewMockSQLBuilder(ctrl),
+		Builder:  mockgen.NewMockRequestQueryBuilder(ctrl),
+		Executor: mockgen.NewMockQueryExecutor(ctrl),
+		DB:       mockgen.NewMockDatabaseRegistry(ctrl),
+	})
+
+	req := crudRequest(http.MethodGet, "/prest-test/public/test", map[string]string{
+		"database": "prest-test", "schema": "public", "table": "test",
+	})
+	req = req.WithContext(context.WithValue(req.Context(), pctx.AdapterKey, selected))
+	rec := httptest.NewRecorder()
+	h.Select(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "prest")
+}
+
 func TestCRUDHandler_Select_TimeBucketClauseError(t *testing.T) {
 	t.Parallel()
 
@@ -258,6 +306,74 @@ func TestCRUDHandler_Select_TimeBucketClauseSuccess(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "ok")
+}
+
+type groupByBinderBuilder struct {
+	*mockgen.MockRequestQueryBuilder
+	placeholderID int
+}
+
+func (b *groupByBinderBuilder) GroupByClauseValues(_ *http.Request, initialPlaceholderID int) (string, []any) {
+	b.placeholderID = initialPlaceholderID
+	return `GROUP BY "status" HAVING AVG("age") > $2`, []any{"o'brien"}
+}
+
+func TestCRUDHandler_Select_GroupByBinder(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	perms := mockgen.NewMockPermissionsChecker(ctrl)
+	perms.EXPECT().FieldsPermissions(gomock.Any(), "prest-test", "public", "test", "read", "").Return([]string{"name"}, nil)
+
+	sqlBuilder := mockgen.NewMockSQLBuilder(ctrl)
+	sqlBuilder.EXPECT().SelectFields([]string{"name"}).Return(`"name"`, nil)
+	sqlBuilder.EXPECT().SelectSQL(`"name"`, "prest-test", "public", "test").Return(`SELECT "name" FROM "prest-test"."public"."test"`)
+
+	inner := mockgen.NewMockRequestQueryBuilder(ctrl)
+	inner.EXPECT().DistinctClause(gomock.Any()).Return("", nil)
+	inner.EXPECT().CountByRequest(gomock.Any()).Return("", nil)
+	inner.EXPECT().JoinByRequest(gomock.Any()).Return(nil, nil)
+	inner.EXPECT().WhereByRequest(gomock.Any(), 1).Return("name=$1", []interface{}{"prest"}, nil)
+	inner.EXPECT().GroupByClause(gomock.Any()).Times(0)
+	inner.EXPECT().TimeBucketClause(gomock.Any()).Return("", nil)
+	inner.EXPECT().OrderByRequest(gomock.Any()).Return("", nil)
+	inner.EXPECT().PaginateIfPossible(gomock.Any()).Return("", nil)
+
+	builder := &groupByBinderBuilder{MockRequestQueryBuilder: inner}
+
+	scanner := mockgen.NewMockScanner(ctrl)
+	scanner.EXPECT().Err().Return(nil)
+	scanner.EXPECT().Bytes().Return([]byte(`[{"name":"prest"}]`))
+
+	executor := mockgen.NewMockQueryExecutor(ctrl)
+	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any(), "prest", "o'brien").DoAndReturn(
+		func(_ context.Context, sql string, _ ...interface{}) adapters.Scanner {
+			require.Contains(t, sql, `GROUP BY "status" HAVING AVG("age") > $2`)
+			return scanner
+		},
+	)
+
+	h := NewCRUDHandler(Deps{
+		// miniship: the read becomes the anonymous role (patch 5).
+		Roles:    upstreamTestRoles,
+		Reader:   readerOver(executor),
+		Perms:    perms,
+		SQL:      sqlBuilder,
+		Builder:  builder,
+		Executor: executor,
+		DB:       mockDatabaseRegistry(ctrl),
+	})
+
+	req := crudRequest(http.MethodGet, "/prest-test/public/test?name=$eq.prest", map[string]string{
+		"database": "prest-test", "schema": "public", "table": "test",
+	})
+	rec := httptest.NewRecorder()
+	h.Select(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 2, builder.placeholderID)
 }
 
 func TestCRUDHandler_Select_WithClauses(t *testing.T) {
@@ -429,6 +545,48 @@ func TestCRUDHandler_Select_RelationNotFound(t *testing.T) {
 
 	db := mockDatabaseRegistry(ctrl)
 
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	req := crudRequest(http.MethodGet, "/prest-test/public/missing", map[string]string{
+		"database": "prest-test", "schema": "public", "table": "missing",
+	})
+	rec := httptest.NewRecorder()
+	h.Select(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestCRUDHandler_Select_ErrRelationNotFound(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	perms := mockgen.NewMockPermissionsChecker(ctrl)
+	perms.EXPECT().FieldsPermissions(gomock.Any(), "prest-test", "public", "missing", "read", "").Return([]string{"id"}, nil)
+
+	sqlBuilder := mockgen.NewMockSQLBuilder(ctrl)
+	sqlBuilder.EXPECT().SelectFields([]string{"id"}).Return("`id`", nil)
+	sqlBuilder.EXPECT().SelectSQL("`id`", "prest-test", "public", "missing").Return("SELECT `id` FROM t")
+
+	builder := mockgen.NewMockRequestQueryBuilder(ctrl)
+	builder.EXPECT().DistinctClause(gomock.Any()).Return("", nil)
+	builder.EXPECT().CountByRequest(gomock.Any()).Return("", nil)
+	builder.EXPECT().JoinByRequest(gomock.Any()).Return(nil, nil)
+	builder.EXPECT().WhereByRequest(gomock.Any(), 1).Return("", nil, nil)
+	builder.EXPECT().GroupByClause(gomock.Any()).Return("")
+	builder.EXPECT().TimeBucketClause(gomock.Any()).Return("", nil)
+	builder.EXPECT().OrderByRequest(gomock.Any()).Return("", nil)
+	builder.EXPECT().PaginateIfPossible(gomock.Any()).Return("", nil)
+
+	scanner := mockgen.NewMockScanner(ctrl)
+	scanner.EXPECT().Err().Return(fmt.Errorf("missing: %w", adapters.ErrRelationNotFound))
+
+	executor := mockgen.NewMockQueryExecutor(ctrl)
+	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
+
+	db := mockDatabaseRegistry(ctrl)
+
+	// miniship: the read becomes the anonymous role (patch 5).
 	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
 	req := crudRequest(http.MethodGet, "/prest-test/public/missing", map[string]string{
 		"database": "prest-test", "schema": "public", "table": "missing",
@@ -800,6 +958,36 @@ func TestCRUDHandler_Select_UnregisteredDB(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// Without [[databases]], a name outside pg.database and
+// pg.allowed_databases is rejected with 400 before any query, so no pool is
+// opened for it.
+func TestCRUDHandler_Select_NoRegistry_UnknownDB_400(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	db := mockgen.NewMockDatabaseRegistry(ctrl)
+	db.EXPECT().IsRegistered("anything").Return(false)
+
+	h := NewCRUDHandler(Deps{
+		DB:       db,
+		Builder:  mockgen.NewMockRequestQueryBuilder(ctrl),
+		Executor: mockgen.NewMockQueryExecutor(ctrl),
+		Perms:    mockgen.NewMockPermissionsChecker(ctrl),
+	})
+
+	req := crudRequest(http.MethodGet, "/anything/public/test", map[string]string{
+		"database": "anything", "schema": "public", "table": "test",
+	})
+	rec := httptest.NewRecorder()
+	h.Select(rec, req)
+
+	// miniship: not found, where upstream answers 400 (patch 2).
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "database not registered")
+}
+
 func TestCRUDHandler_Select_PermissionErrorOnFields(t *testing.T) {
 	t.Parallel()
 
@@ -1166,26 +1354,6 @@ func TestCRUDHandler_Select_NoCacheOnHead(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Empty(t, cacher.key)
-}
-
-func TestCRUDHandler_Select_SingleDBMismatch(t *testing.T) {
-	t.Parallel()
-
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	db := mockDatabaseRegistry(ctrl)
-	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(nil), DB: db, SingleDB: true})
-
-	req := crudRequest(http.MethodGet, "/other/public/test", map[string]string{
-		"database": "other", "schema": "public", "table": "test",
-	})
-	rec := httptest.NewRecorder()
-	h.Select(rec, req)
-
-	// miniship: not found, where upstream answered 400.
-	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.Contains(t, rec.Body.String(), "database not registered")
 }
 
 func TestCRUDHandler_Select_NonUserContextIgnored(t *testing.T) {
@@ -1681,10 +1849,93 @@ func TestCRUDHandler_Update_WithReturning(t *testing.T) {
 func TestNewCRUDHandler(t *testing.T) {
 	t.Parallel()
 
-	deps := Deps{SingleDB: true}
-	h := NewCRUDHandler(deps)
+	h := NewCRUDHandler(Deps{})
 	require.NotNil(t, h)
-	require.True(t, h.singleDB)
+}
+
+// A refused connection answers 503 with a fixed message: the driver text
+// ("dial tcp 10.0.0.5:5432: connect: connection refused") leaks the host.
+func TestCRUDHandler_Select_DatabaseUnavailable(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	perms, sqlBuilder, builder, executor, db := baseSelectMocks(ctrl)
+	expectSelectBuilderHappyPath(builder)
+
+	scanner := mockgen.NewMockScanner(ctrl)
+	scanner.EXPECT().Err().Return(dialError())
+	executor.EXPECT().QueryCtx(gomock.Any(), gomock.Any()).Return(scanner)
+
+	// miniship: the read becomes the anonymous role (patch 5).
+	h := NewCRUDHandler(Deps{Roles: upstreamTestRoles, Reader: readerOver(executor), Perms: perms, SQL: sqlBuilder, Builder: builder, Executor: executor, DB: db})
+	rec := runSelect(t, h, http.MethodGet)
+
+	// miniship: a Database rest cannot read is 502 (patch 17), where
+	// upstream answers 503.
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), "the Database could not be read")
+	require.NotContains(t, rec.Body.String(), "dial")
+}
+
+// Write paths map connection failures the same way as reads.
+func TestCRUDHandler_Writes_DatabaseUnavailable(t *testing.T) {
+	t.Parallel()
+
+	vars := map[string]string{"database": "prest-test", "schema": "public", "table": "test"}
+	cases := []struct {
+		name   string
+		method string
+		setup  func(*mockgen.MockRequestQueryBuilder, *mockgen.MockSQLBuilder, *mockgen.MockQueryExecutor, *mockgen.MockScanner)
+		call   func(*CRUDHandler, http.ResponseWriter, *http.Request)
+	}{
+		{"insert", http.MethodPost, func(b *mockgen.MockRequestQueryBuilder, s *mockgen.MockSQLBuilder, e *mockgen.MockQueryExecutor, sc *mockgen.MockScanner) {
+			b.EXPECT().ParseInsertRequest(gomock.Any()).Return(`"name"`, "$1", []interface{}{"x"}, nil)
+			s.EXPECT().InsertSQL(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(`INSERT`)
+			e.EXPECT().InsertCtx(gomock.Any(), gomock.Any(), gomock.Any()).Return(sc)
+		}, (*CRUDHandler).Insert},
+		{"batch insert", http.MethodPost, func(b *mockgen.MockRequestQueryBuilder, s *mockgen.MockSQLBuilder, e *mockgen.MockQueryExecutor, sc *mockgen.MockScanner) {
+			b.EXPECT().ParseBatchInsertRequest(gomock.Any()).Return(`"name"`, "($1)", []interface{}{"x"}, nil)
+			s.EXPECT().InsertSQL(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(`INSERT`)
+			e.EXPECT().BatchInsertValuesCtx(gomock.Any(), gomock.Any(), gomock.Any()).Return(sc)
+		}, (*CRUDHandler).BatchInsert},
+		{"delete", http.MethodDelete, func(b *mockgen.MockRequestQueryBuilder, s *mockgen.MockSQLBuilder, e *mockgen.MockQueryExecutor, sc *mockgen.MockScanner) {
+			b.EXPECT().WhereByRequest(gomock.Any(), 1).Return("", nil, nil)
+			b.EXPECT().ReturningByRequest(gomock.Any()).Return("", nil)
+			s.EXPECT().DeleteSQL(gomock.Any(), gomock.Any(), gomock.Any()).Return(`DELETE`)
+			e.EXPECT().DeleteCtx(gomock.Any(), gomock.Any()).Return(sc)
+		}, (*CRUDHandler).Delete},
+		{"update", http.MethodPut, func(b *mockgen.MockRequestQueryBuilder, s *mockgen.MockSQLBuilder, e *mockgen.MockQueryExecutor, sc *mockgen.MockScanner) {
+			b.EXPECT().SetByRequest(gomock.Any(), 1).Return(`"name"=$1`, []interface{}{"x"}, nil)
+			b.EXPECT().WhereByRequest(gomock.Any(), 2).Return("", nil, nil)
+			b.EXPECT().ReturningByRequest(gomock.Any()).Return("", nil)
+			s.EXPECT().UpdateSQL(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(`UPDATE`)
+			e.EXPECT().UpdateCtx(gomock.Any(), gomock.Any(), gomock.Any()).Return(sc)
+		}, (*CRUDHandler).Update},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			builder := mockgen.NewMockRequestQueryBuilder(ctrl)
+			sqlBuilder := mockgen.NewMockSQLBuilder(ctrl)
+			executor := mockgen.NewMockQueryExecutor(ctrl)
+			scanner := mockgen.NewMockScanner(ctrl)
+			scanner.EXPECT().Err().Return(dialError())
+			tc.setup(builder, sqlBuilder, executor, scanner)
+
+			h := NewCRUDHandler(Deps{Builder: builder, SQL: sqlBuilder, Executor: executor, DB: mockDatabaseRegistry(ctrl)})
+			rec := httptest.NewRecorder()
+			tc.call(h, rec, crudRequest(tc.method, "/prest-test/public/test", vars))
+
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			require.Contains(t, rec.Body.String(), "database unavailable")
+			require.NotContains(t, rec.Body.String(), "10.0.0.5")
+		})
+	}
 }
 
 // miniship: the table read runs as a role, so upstream's Select tests are

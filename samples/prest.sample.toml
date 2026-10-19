@@ -10,6 +10,21 @@
 
 version = 1
 
+# Dialect for the single [pg] connection below. Default "postgres", including
+# Timescale detection. "mysql" selects the MySQL 8.0.19+ adapter (v2.5.0;
+# read-only MCP from v2.5.1). Any other value fails startup.
+# Env: PREST_ENGINE. https://docs.prestd.com/databases/mysql
+engine = "postgres"
+
+# MySQL example (leave commented; the active engine above stays postgres).
+# Replace the connection fields in the real [pg] table further down
+# (host, port, user, pass, database, or url). Do not add a second [pg] table.
+# engine = "mysql"
+# url = "mysql://user:pass@127.0.0.1:3306/mydb"
+# Port defaults to 3306 when unset. User and database are required.
+# Postgres defaults (user postgres, database prest, port 5432) are not copied.
+# PREST_DB_* is read first, then PREST_PG_*.
+
 # Base path all pREST HTTP routes are served under.
 context = "/"
 
@@ -22,13 +37,16 @@ pluginpath = "./lib"
 # Directory of .sql migration files.
 # migrations = "./migrations"
 
-# Custom Go plugin middlewares, loaded from `pluginpath`, run before request
-# handling. Each entry maps to a compiled .so file and the exported function
-# name to call.
+# Custom Go plugin middlewares, loaded from `pluginpath`/middlewares/, run
+# before request handling. Each entry is an array-of-tables item (note the
+# double brackets). `file` is the .so basename; `func` is the prefix of the
+# exported `{func}MiddlewareLoad` symbol (see docs.prestd.com/plugins).
+# Plugins must be built with the same Go version/OS/arch and preferably the
+# same vendor tree as prestd (`go mod vendor` + -trimpath -ldflags "-s -w").
 #
 # [[pluginmiddlewarelist]]
-# file = "custom_auth"
-# func = "Middleware"
+# file = "hello"
+# func = "Hello"
 
 
 # ------------------------------------------------------------------------
@@ -54,7 +72,7 @@ key = "/etc/certs/cert.key"
 
 
 # ------------------------------------------------------------------------
-# [pg] - the PostgreSQL connection pREST serves data from.
+# [pg] - the database connection (PostgreSQL unless `engine` is `mysql`) pREST serves data from.
 # ------------------------------------------------------------------------
 [pg]
 host = "127.0.0.1"
@@ -68,10 +86,9 @@ database = "prest"
 maxidleconn = 0  # 0 avoids DB connections leaking on request timeout
 maxopenconn = 10
 conntimeout = 10 # seconds
-# Whether a single shared DB connection is used (true) or the per-request
-# lifecycle is used (false). Ignored when a `[[databases]]` registry (see
-# below) is configured.
-single = true
+# Extra databases on this host served when no [[databases]] registry is configured (Postgres and MySQL).
+# Also limits what /databases lists. Env: PREST_DB_ALLOWED_DATABASES / PREST_PG_ALLOWED_DATABASES.
+allowed_databases = []
 # Enables query result caching against this database (see [cache] below).
 cache = true
 
@@ -79,17 +96,29 @@ cache = true
 # above, which is about pREST's own HTTP listener.
 [pg.ssl]
 mode = "disable" # disable | require | verify-ca | verify-full
+# PostgreSQL modes: disable | require | verify-ca | verify-full.
+# MySQL modes: disable | require | skip-verify. A client cert, key, or
+# rootcert fails startup when engine is mysql.
 # cert = "/etc/certs/pg-client.crt"
 # key = "/etc/certs/pg-client.key"
 # rootcert = "/etc/certs/pg-root.crt"
 
 
 # ------------------------------------------------------------------------
+# [mysql] - MySQL driver options. Ignored when engine is postgres.
+# ------------------------------------------------------------------------
+# [mysql]
+# prepare = false  # false: interpolate params. true: binary prepare protocol.
+# Env: PREST_MYSQL_PREPARE
+
+
+# ------------------------------------------------------------------------
 # [[databases]] - optional multi-database registry.
 #
-# When present, pREST serves multiple named PostgreSQL databases instead of
-# the single [pg] connection above; each is reachable under its alias in the
-# URL path. Omit this section entirely to use only the [pg] database.
+# Each alias is its own connection; set `engine` per entry, or leave it empty
+# to inherit the root engine. A `mysql://` URL with no `engine` is MySQL. Any
+# other URL is not probed. Omit this section entirely to use only the [pg]
+# database.
 # ------------------------------------------------------------------------
 # [[databases]]
 # alias = "app"
@@ -107,12 +136,21 @@ mode = "disable" # disable | require | verify-ca | verify-full
 # user = "postgres"
 # pass = "postgres"
 # database = "reporting_db"
+#
+# [[databases]]
+# alias = "shop"
+# engine = "mysql"
+# url = "mysql://user:pass@127.0.0.1:3306/shop"
 
 
 # ------------------------------------------------------------------------
 # [auth] - basic username/password authentication against a users table.
 # ------------------------------------------------------------------------
 [auth]
+# When enabled, every data route requires a token: CRUD, /_QUERIES, /_mcp, the
+# catalog (/databases, /schemas, /tables, /{db}/{schema}, /show/...) and
+# /_PLUGIN. Only /auth, /_health, /_ready and /_studio assets stay public; add a
+# pattern to [jwt].whitelist to exempt anything else.
 enabled = false
 # migrate_on_startup = true   # default true when enabled=true; also: prestd migrate up auth
 schema = "public"

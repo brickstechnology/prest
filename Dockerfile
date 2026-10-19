@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1
 
+# Go toolchain for the release image. Plugins only load when they are built with
+# the exact Go version that built prestd, so goreleaser passes the patch version.
+ARG GO_VERSION=1.26
+
 # --- Studio frontend ---
 FROM node:24-bookworm AS studio
 WORKDIR /workspace/studio
@@ -38,20 +42,28 @@ COPY --from=builder /workspace/prestd /bin/prestd
 COPY --from=builder /workspace/etc/entrypoint.sh /app/entrypoint.sh
 COPY --from=builder /workspace/lib /app/lib
 COPY --from=builder /workspace/etc/plugin /app/plugin
+# Same module identity as the prestd binary so entrypoint plugin rebuilds load.
+COPY --from=builder /workspace/go.mod /workspace/go.sum /app/
+COPY --from=builder /workspace/vendor /app/vendor
 WORKDIR /app
 ENTRYPOINT ["sh", "/app/entrypoint.sh"]
 
-# GoReleaser: prebuilt binary + extra_files only (no studio/ in context)
-FROM registry.hub.docker.com/library/golang:1.26 AS release
+# GoReleaser (dockers_v2): prebuilt binary under $TARGETPLATFORM/ + extra_files
+# only (no studio/ in context)
+FROM registry.hub.docker.com/library/golang:${GO_VERSION} AS release
+ARG TARGETPLATFORM
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install --no-install-recommends -yq netcat-traditional && \
     rm -rf /var/lib/apt/lists/*
 ENV CGO_ENABLED=1
 ENV PREST_BUILD_PLUGINS=1
-COPY prestd /bin/prestd
+COPY $TARGETPLATFORM/prestd /bin/prestd
 COPY etc/entrypoint.sh /app/entrypoint.sh
 COPY lib /app/lib
 COPY etc/plugin /app/plugin
+# Same module identity as the prestd binary so entrypoint plugin rebuilds load.
+COPY go.mod go.sum /app/
+COPY vendor /app/vendor
 WORKDIR /app
 ENTRYPOINT ["sh", "/app/entrypoint.sh"]
 

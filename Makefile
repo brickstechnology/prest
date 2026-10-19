@@ -1,7 +1,17 @@
 DOCKER_COMPOSE?=docker-compose -f docker-compose.yml
 UNIT_PKGS = $(shell go list ./... | grep -v '/integration')
 
-.PHONY: build_test_image test test-unit test-integration test-integration-postgres test-integration-timescaledb test-integration-log test-integration-postgres-log test-integration-timescaledb-log ci signoz-up signoz-down
+.PHONY: build build_test_image test test-unit test-integration test-integration-postgres test-integration-timescaledb test-integration-mysql test-integration-log test-integration-postgres-log test-integration-timescaledb-log ci signoz-up signoz-down
+.DEFAULT_GOAL := build_test_image
+
+VERSION ?= $(shell git describe --tags --always --dirty)
+COMMIT  ?= $(shell git rev-parse --short HEAD)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X github.com/prest/prest/v2/helpers.Version=$(VERSION) -X github.com/prest/prest/v2/helpers.Commit=$(COMMIT) -X github.com/prest/prest/v2/helpers.Date=$(DATE)
+
+build:
+	go build -ldflags "$(LDFLAGS)" -o bin/prestd ./cmd/prestd
+
 build_test_image:
 	$(DOCKER_COMPOSE) up -d postgres
 
@@ -26,12 +36,13 @@ test-unit:
 
 POSTGRES_COMPOSE=docker compose -f integration/postgres/docker-compose.yml
 TIMESCALEDB_COMPOSE=docker compose -f integration/timescaledb/docker-compose.yml
+MYSQL_COMPOSE=docker compose -f integration/mysql/docker-compose.yml
 
 # Alias for the historical Postgres integration target.
 test-integration: test-integration-postgres
 
 test-integration-postgres:
-	$(POSTGRES_COMPOSE) up -d --wait postgres postgres-b db-init prestd prestd-multicluster prestd-auth prestd-queries prestd-cache && \
+	$(POSTGRES_COMPOSE) up -d --wait postgres postgres-b db-init prestd prestd-multicluster prestd-auth prestd-queries prestd-cache prestd-samehost && \
 	$(POSTGRES_COMPOSE) run --rm --no-deps tests; \
 	status=$$?; \
 	$(POSTGRES_COMPOSE) down -v --remove-orphans; \
@@ -59,7 +70,7 @@ test-integration-log:
 test-integration-postgres-log:
 	@echo "Writing full Postgres integration output to $(INTEGRATION_LOG)"
 	@{ \
-	  $(POSTGRES_COMPOSE) up -d --wait postgres postgres-b db-init prestd prestd-multicluster prestd-auth prestd-queries prestd-cache && \
+	  $(POSTGRES_COMPOSE) up -d --wait postgres postgres-b db-init prestd prestd-multicluster prestd-auth prestd-queries prestd-cache prestd-samehost && \
 	  $(POSTGRES_COMPOSE) run --rm --no-deps tests; \
 	  echo $$? > .integration-status.$$$$; \
 	  $(POSTGRES_COMPOSE) down -v --remove-orphans; \
@@ -71,7 +82,7 @@ test-integration-postgres-log:
 test-integration-timescaledb-log:
 	@echo "Writing full TimescaleDB integration output to $(INTEGRATION_LOG)"
 	@{ \
-	  $(TIMESCALEDB_COMPOSE) up -d --wait timescaledb db-init prestd && \
+	  $(TIMESCALEDB_COMPOSE) up -d --wait timescaledb db-init prestd prestd-queries && \
 	  $(TIMESCALEDB_COMPOSE) run --rm --no-deps tests; \
 	  echo $$? > .integration-status.$$$$; \
 	  $(TIMESCALEDB_COMPOSE) down -v --remove-orphans; \
@@ -81,10 +92,23 @@ test-integration-timescaledb-log:
 	exit $$status
 
 test-integration-timescaledb:
-	$(TIMESCALEDB_COMPOSE) up -d --wait timescaledb db-init prestd && \
+	$(TIMESCALEDB_COMPOSE) up -d --wait timescaledb db-init prestd prestd-queries && \
 	$(TIMESCALEDB_COMPOSE) run --rm --no-deps tests; \
 	status=$$?; \
 	$(TIMESCALEDB_COMPOSE) down -v --remove-orphans; \
+	exit $$status
+
+# MySQL only (./integration/mysql/...). Does not run integration/suites or other DBs.
+# One invocation, one image. Default is mysql:8.4. CI passes MYSQL_IMAGE for 8.0, 8.4, and latest.
+# Example: MYSQL_IMAGE=mysql:8.0 make test-integration-mysql
+MYSQL_IMAGE ?= mysql:8.4
+export MYSQL_IMAGE
+
+test-integration-mysql:
+	$(MYSQL_COMPOSE) up -d --wait mysql db-init prestd prestd-auth prestd-queries prestd-registry && \
+	$(MYSQL_COMPOSE) run --rm --no-deps tests; \
+	status=$$?; \
+	$(MYSQL_COMPOSE) down -v --remove-orphans; \
 	exit $$status
 
 .PHONY: dc-up
@@ -107,6 +131,7 @@ mockgen:
 	mockgen -destination=adapters/mockgen/query_executor.go -package=mockgen github.com/prest/prest/v2/adapters QueryExecutor
 	mockgen -destination=adapters/mockgen/catalog_querier.go -package=mockgen github.com/prest/prest/v2/adapters CatalogQuerier
 	mockgen -destination=adapters/mockgen/sql_builder.go -package=mockgen github.com/prest/prest/v2/adapters SQLBuilder
+	mockgen -destination=adapters/mockgen/dialect.go -package=mockgen github.com/prest/prest/v2/adapters Dialect
 	mockgen -destination=adapters/mockgen/permissions_checker.go -package=mockgen github.com/prest/prest/v2/adapters PermissionsChecker
 	mockgen -destination=adapters/mockgen/script_runner.go -package=mockgen github.com/prest/prest/v2/adapters ScriptRunner
 	mockgen -destination=adapters/mockgen/query_registry.go -package=mockgen github.com/prest/prest/v2/adapters QueryRegistry
