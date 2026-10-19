@@ -637,14 +637,53 @@ this one did not — two commits is a small sample of what a release moves.
 [#1032]: https://github.com/prest/prest/pull/1032
 [#1033]: https://github.com/prest/prest/pull/1033
 
+### Taken: v2.5.2, 19 October 2026
+
+The first real rebase, onto upstream's `v2.5.2` (`18169d6`), for
+miniship-cloud#1148, #1164 and #1451 (v2.5.0 to v2.5.2) and the three
+advisories v2.5.2 fixes (#1452 to #1454, patch 25). `v2.4.2..v2.5.2` is 11
+upstream commits and 221 files: MySQL as a second engine, a per-request
+adapter in the handlers, `pg.allowed_databases`, unreachable-at-start-up
+registry entries served lazily, `config.go` split into a file per section,
+`pg.single` removed, and the security hardening.
+
+| | |
+| --- | --- |
+| Step 1, rebase | `git rebase --onto v2.5.2 v2.4.2` replayed **35 commits**, dropping 19 merges. **12 of them conflicted**, in 12 files; `controllers/crud.go`, `app/app.go` and `config/config.go` most. One commit on top, `fff0ec8`, settles what upstream's new code changed under the patches |
+| Step 2, record | the fork-point rows, `2.5.2+miniship`, patches 2, 5, 9 and 15's `Paths:` lines, and patch 25. Chain tagged `patches/v2.5.2` |
+| Step 3, suite | `go vet` clean; unit as CI runs it, `EXIT 0`; integration on CI, **147 top-level tests ran and 201 skipped**, and the three census lines 9 of 9, 53 of 53, 4 of 4 |
+| Step 4, merge | `git merge -s ours origin/miniship`; `git diff v2.5.2 HEAD` is **96 files**, every one a path a `Paths:` line names |
+
+**The merges are where the work hid.** Four patch lines had been developed on
+parallel branches and joined by merge commits whose resolutions the rebase
+drops (#547 against #549, #1427 against #1428 among them), so those had to be
+settled again, by reading the old line's file beside upstream's. The check
+that caught a wrong one was comparing the rebased tree with both sides: a file
+only the patches touch must equal `origin/miniship`'s, and one only upstream
+touches must equal the tag's. Every difference was one of the deliberate ones
+below or in `fff0ec8`.
+
+**Upstream fixed four things a patch had fixed first.** Patch 9's pool limits
+and the half of patch 2 in `IsRegistered` are upstream's own now, with the
+same name in one case (`fillPoolDefaults`). Upstream also moved the adapter
+selector after the match, which is patch 12's diagnosis, and serves an
+unreachable entry with an unconnected adapter, which is half of patch 13.
+Where upstream's fix and the patch say the same thing, upstream's line is
+kept and the patch's is gone; where they differ, the patch's behaviour is
+kept and named in patch 25 or `fff0ec8`.
+
+**Expect the start-up tests again.** Upstream asserts what `app.New` dials;
+rest dials nothing, so every such test upstream adds is one rest answers the
+other way.
+
 ## Upstream's tests that do not run here
 
 `integration/suites/...` and parts of `integration/postgres/...` drive a
 deployed `prestd` through upstream's whole route table, and skip unless
 `make test-integration` has started one. They assert routes this fork removes,
-so that target is not run here. In `miniship.yml` they skip, 109 of them, and
-**97** Postgres-backed tests run, measured on a CI runner rather than on a
-developer's machine. The first number is upstream's and moves with
+so that target is not run here. In `miniship.yml` they skip, 201 of them on
+v2.5.2 (109 on v2.4.2), and **147** top-level tests run, measured on a CI
+runner rather than on a developer's machine. The first number is upstream's and moves with
 a rebase; the second is this branch's and moves whenever a patch adds a subject,
 so treat both as the last measurement rather than a promise. `miniship.yml`
 prints them on every run's summary, beside the line
@@ -665,6 +704,7 @@ in the repository's Actions settings, not deleted.
 | `test-unit.yml` | disabled | `miniship.yml` runs the same tests; its coverage-comment jobs need a baseline run on `main` |
 | `test-integration.yml` | disabled | drives a deployed `prestd` through upstream's whole route table, which this fork cuts to two routes |
 | `test-integration-timescaledb.yml` | disabled | the same, against TimescaleDB |
-| `codeql-analysis.yml` | kept | analysis only; it triggers on `main`, so here it runs on its weekly schedule |
+| `test-integration-mysql.yml` | **to disable** | new in v2.5.0; drives `prestd` against MySQL through the catalog routes this fork removes, so it fails on every pull request here (404) |
+| `docker-smoke.yml` | **to disable** | new in v2.5.0; builds upstream's own image and asks it for routes this fork removes, so it fails on a pull request that changes `go.mod` |
 | `lint.yml` | kept | `golangci-lint`, which upstream marks `continue-on-error` |
 | `studio.yml` | kept | checks the Studio frontend when `studio/` changes |
