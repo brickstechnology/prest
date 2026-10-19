@@ -4,9 +4,10 @@ package helpers
 //
 // A `rest` image is built by the public monorepo with
 // `go build -trimpath -ldflags="-s -w"` and no `-X`, so `Version` is empty and
-// what `prestd version` prints is the fallback below. Upstream leaves that
-// fallback at 2.0.0 on a v2.4.2 tree, which tells someone holding only an
-// image nothing about which upstream release it carries.
+// what `prestd version` prints is the fallback below. Upstream left that
+// fallback at 2.0.0 on a v2.4.2 tree, and sets it to devel from v2.5.0, which
+// tells someone holding only an image nothing about which upstream release it
+// carries.
 //
 // **It is set here, in a file of miniship's own, rather than edited in
 // prest.go.** Upstream has moved that literal repeatedly for its own version
@@ -20,5 +21,5 @@ package helpers
 // cmd/version_miniship_test.go holds this string to it, so a rebase that moves
 // one and not the other is red.
 func init() {
-	PrestVersionNumber = "2.4.2+miniship"
+	PrestVersionNumber = "2.5.2+miniship"
 }

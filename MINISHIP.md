@@ -10,8 +10,8 @@ scratch, is recorded in miniship-cloud's ADR 0017.
 
 | | |
 | --- | --- |
-| Upstream tag | `v2.4.2` |
-| Upstream commit | `9070bda7e9ab6b6484e04a0983b8afd61c8315e6` |
+| Upstream tag | `v2.5.2` |
+| Upstream commit | `18169d6c48bcf1c1769e1ded8dfa399cb6b0cbf4` |
 | Branch | `miniship`, the fork's default branch |
 | Go module path | `github.com/prest/prest/v2`, kept so an upstream rebase does not conflict on every import |
 
@@ -26,7 +26,7 @@ backticks:
   point.
 
 A `prestd` built from this branch reports the tag on the miniship line:
-`prestd version` ends in `2.4.2+miniship`.
+`prestd version` ends in `2.5.2+miniship`.
 
 Upstream's `LICENSE` (MIT) is kept unchanged. miniship's changes are commits on
 `miniship` above the tag, and miniship's public monorepo pins one commit of this
@@ -50,12 +50,15 @@ you mean the files, and the directory only when the patch owns all of it.
 2. **A database `rest` was not given is refused** — without a registry,
    upstream tried any path segment as a database of that name on its one
    configured host. `connection.Manager` now resolves a registry alias or the
-   configured database and nothing else, `IsRegistered` agrees, and the table
-   read answers such a name 404 without opening a connection.
+   configured database and nothing else, and the table read answers such a
+   name 404 without opening a connection. Upstream's v2.5.0 refuses it in
+   `IsRegistered` too, and adds `pg.allowed_databases`, other databases on the
+   same host that are served without a registry; the manager resolves those as
+   given, and still builds a URI for no other name, which upstream's does.
    Paths: `adapters/postgres/internal/connection/conn.go`,
    `adapters/postgres/internal/connection/conn_test.go`,
    `adapters/postgres/internal/connection/given_test.go`,
-   `adapters/postgres/postgres.go`, `adapters/postgres/postgres_test.go`,
+   `adapters/postgres/postgres_test.go`,
    `adapters/postgres/query_registry_test.go`, `controllers/crud.go`,
    `controllers/crud_test.go`,
    `integration/postgres/adapters/postgres/postgres_test.go`
@@ -88,7 +91,7 @@ you mean the files, and the directory only when the patch owns all of it.
    may not have, and prints how many of its subjects got that Postgres;
    `miniship.yml` fails when that line is missing.
    Paths: `adapters/anonymous_role.go`, `adapters/postgres/anonymous_role.go`,
-   `adapters/timescaledb/anonymous_role.go`, `config/config.go`,
+   `adapters/timescaledb/anonymous_role.go`, `config/config.go`, `config/db.go`,
    `config/database_registry.go`, `config/anonymous_role_test.go`,
    `controllers/crud.go`, `controllers/crud_test.go`,
    `controllers/crud_anonymous_role_test.go`, `controllers/deps.go`,
@@ -108,10 +111,13 @@ you mean the files, and the directory only when the patch owns all of it.
    image carries no shell and no HTTP client for a container health check to
    run.
    Paths: `cmd/health.go`, `cmd/health_test.go`, `cmd/root.go`
-9. **A bounded pool for an environment registry entry** — upstream gave a
+9. **A bounded pool for an environment registry entry** — pREST v2.4.2 gave a
    `DATABASE_URL_<n>` entry 0 open connections, which `database/sql` reads as
-   no limit. It now takes `pg.maxopenconn` and `pg.maxidleconn`.
-   Paths: `config/database_registry.go`, `config/anonymous_role_test.go`
+   no limit. It takes `pg.maxopenconn` and `pg.maxidleconn` now, and since
+   v2.5.0 that is upstream's own `fillPoolDefaults`, so this patch changes no
+   line of its own. The number stays so the ones after it keep theirs, and its
+   test stays as the check that upstream still does it.
+   Paths: `config/anonymous_role_test.go`
 10. **This record, and the check on it** — a vendored copy takes an upstream
     fix only when somebody notices it exists, so the fork point is written where
     a program can read it and the branch is held to what is written.
@@ -120,10 +126,11 @@ you mean the files, and the directory only when the patch owns all of it.
     `rebase/...` branch so a rebase is checked before it replaces `miniship`.
     Paths: `MINISHIP.md`, `miniship/record.go`, `miniship/record_test.go`,
     `.github/workflows/miniship.yml`
-11. **The binary names its upstream tag** — upstream's fallback version is
-    `2.0.0`, and the public monorepo builds this with no `-ldflags` that
-    replace it, so `prestd version` said `2.0.0` on a `v2.4.2` tree. It says
-    `2.4.2+miniship` now, set by an `init` in a file of miniship's own rather
+11. **The binary names its upstream tag** — upstream's fallback version was
+    `2.0.0`, and is `devel` from v2.5.0, and the public monorepo builds this
+    with no `-ldflags` that replace it, so `prestd version` said `2.0.0` on a
+    `v2.4.2` tree. It says `2.5.2+miniship` now, set by an `init` in a file of
+    miniship's own rather
     than by editing upstream's literal, which upstream moves on every version
     bump and would conflict on every rebase. `cmd/version_miniship_test.go`
     holds it to the fork point above, so a rebase that moves one and not the
@@ -196,7 +203,7 @@ you mean the files, and the directory only when the patch owns all of it.
     `controllers/query_screen_test.go`, `controllers/crud.go`,
     `controllers/crud_test.go`, `controllers/deps.go`,
     `controllers/helpers.go`, `adapters/postgres/anonymous_role.go`,
-    `config/config.go`, `middlewares/middlewares.go`,
+    `config/config.go`, `config/db.go`, `middlewares/middlewares.go`,
     `middlewares/middlewares_test.go`, `app/query_screen_test.go`,
     `app/error_body_test.go`,
     `integration/postgres/anonymousrole/query_bounds_test.go`,
@@ -461,6 +468,71 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_embed_test.go`,
     `integration/postgres/anonymousrole/postgrest_write_test.go`,
     `MINISHIP.md`
+
+24. **The Supabase SDK's array, range, jsonb and full-text filters** —
+    miniship-cloud#1427, spec #1422: the read's filters (patch 19), and so a
+    write's, a function's result's and an embedded table's, answer `cs`, `cd`,
+    `ov`, `sl`, `sr`, `nxl`, `nxr`, `adj` and `fts`, `plfts`, `phfts`, `wfts`
+    with PostgREST v12.2.3's meaning, under `not.`, inside `or=( … )` and
+    `and=( … )`, and on `other.col=…`. These are what the SDK's `contains`,
+    `containedBy`, `overlaps`, `rangeGt`, `rangeGte`, `rangeLt`, `rangeLte`,
+    `rangeAdjacent` and `textSearch` write. The operators are SqlFragment.hs's
+    `simpleOperator` (`@>`, `<@`, `&&`, `<<`, `>>`, `&>` for `nxl`, `&<` for
+    `nxr`, `-|-`) and `ftsOperator` (`@@ to_tsquery`, `plainto_tsquery`,
+    `phraseto_tsquery`, `websearch_to_tsquery`); the optional configuration is
+    QueryParams.hs's `pFts`, an identifier in parentheses (`fts(english)`), and
+    is the function's first argument. A value is handed to the Database as one
+    parameter of unknown type, as `pgFmtFilter` hands it as an unknown literal,
+    so `{a,b}`, a json value and a range literal (`[1,5)`) are read by the
+    column's own type and nothing of it becomes SQL text. A value that does not
+    parse is therefore the Database's own error with its SQLSTATE and
+    PostgREST's status (`22P02` 400 for a malformed array, json or range;
+    `42601` 400 for a tsquery it cannot read; `42704` 400 for a configuration
+    it lacks), and an operator the column's type lacks is `42883`, now 404 on
+    a read as PostgREST gives it (Error.hs, `pgErrorStatus`; a write already
+    answered it so). An operator name rest does not know, or a configuration
+    that is not an identifier, is `PGRST100`. Inside a group the items are
+    split as QueryParams.hs's `pLogicSingleVal` reads them: a double-quoted
+    value (`span.sl."[15,30)"`) keeps its comma and loses its quotes, and a
+    `{…}` run (`tags.cs.{a,b}`, `meta.cs.{"k":"v","n":1}`) is kept as written.
+    A quoted value inside a nested group now keeps its quotes until that group
+    splits it. Not answered: `eq(any)` and `eq(all)`, `match`, `imatch`,
+    `isdistinct` (spec #1422 puts them out of scope).
+    Paths: `controllers/postgrest_operators_test.go`,
+    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `integration/postgres/anonymousrole/postgrest_operators_test.go`,
+    `MINISHIP.md`
+
+25. **v2.5.2, and the three advisories it fixes** — miniship-cloud#1451 to
+    #1454. pREST published GHSA-2x9q-r7j9-g85f (the stored-query control
+    plane runs SQL anyone stored), GHSA-fhf5-m388-4w4p (the catalog answers
+    without a token) and GHSA-fmr6-9j48-xrqp (`/_PLUGIN/{file}` loads a `.so`
+    by traversal) on 19 October 2026, fixed in v2.5.2 by upstream's
+    `e7b5881` (#1070) and, for the database listing, `0a83204` (#1068).
+    None of the three reached `rest` as shipped: patch 4 never registered
+    `/_QUERIES`, `/_PLUGIN`, `/databases`, `/schemas`, `/tables`, `/show` or
+    `/{database}/{schema}`, so the requests they make are not found before
+    and after. What v2.5.2 fixes underneath is taken whole: pREST's
+    control-plane tables are refused by the table read, the plugin loader
+    refuses a name that leaves its directory before it opens anything, and
+    the database listing names only the databases rest was given.
+    `app/advisories_test.go` asks each of the three of the composed stack;
+    the subjects of the fixes underneath fail on the fork before this rebase
+    and pass on it. `router/router_test.go` is upstream's test of its new
+    route stacks, turned into the same advisories' requests answered not
+    found, with auth on and off. One collision, decided for rest: upstream
+    refuses its reserved table names on every three-segment path, and so on
+    the Supabase SDK's `/rest/v1/{table}`, which pREST's access list reads as
+    a table of a Database called `rest` in a schema called `v1`. A Project
+    may own a table called `prest_users`, and rest keeps no control-plane
+    table in a Project's Database, so that address is not a pREST table path
+    (`middlewares/utils.go`) and the Database's grants decide, as patch 19
+    has it. Upstream's start-up tests of the connections v2.5.0 makes at
+    start-up are rest's patch 13 now: nothing is dialled, so nothing is
+    unreachable.
+    Paths: `app/advisories_test.go`, `app/startup_test.go`,
+    `app/startup_internal_test.go`, `middlewares/utils.go`,
+    `router/router_test.go`
 
 ## Taking an upstream fix
 

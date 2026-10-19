@@ -45,6 +45,16 @@ func getVars(path string) (paths map[string]string) {
 	if len(segments) != 3 {
 		return nil
 	}
+	// miniship (#1302): /rest/v1/{table} is the Supabase SDK's address, not a
+	// table of a Database called rest in a schema called v1. What a caller may
+	// read there is the Database's own grants and row security, as the role
+	// the read becomes (patch 5). pREST's list is not consulted on it, and so
+	// neither are its reserved control-plane names (GHSA-2x9q-r7j9-g85f): a
+	// Project's own table may be called prest_users, and rest keeps no
+	// control-plane table in a Project's Database to protect.
+	if segments[0] == "rest" && segments[1] == "v1" {
+		return nil
+	}
 	return map[string]string{
 		"database": segments[0],
 		"schema":   segments[1],

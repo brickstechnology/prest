@@ -1,15 +1,10 @@
 package router
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"testing"
-	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
@@ -17,7 +12,6 @@ import (
 	"github.com/prest/prest/v2/adapters/mockgen"
 	"github.com/prest/prest/v2/config"
 	"github.com/prest/prest/v2/controllers"
-	"github.com/prest/prest/v2/controllers/auth"
 	"github.com/prest/prest/v2/middlewares"
 	"github.com/prest/prest/v2/plugins"
 )
@@ -92,23 +86,6 @@ func newTestRouterWithRegistry(t *testing.T, authEnabled, withRegistry bool) *ro
 	return f
 }
 
-func signRouterTestJWT(t *testing.T, username string) string {
-	t.Helper()
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: []byte(testRouterJWTKey)},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	require.NoError(t, err)
-	now := time.Now()
-	token, err := jwt.Signed(sig).Claims(auth.Claims{
-		UserInfo:  auth.User{Username: username},
-		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
-		Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
-	}).Serialize()
-	require.NoError(t, err)
-	return token
-}
-
 func serve(f *routerFixture, method, target, token string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, nil)
 	if token != "" {
@@ -119,166 +96,90 @@ func serve(f *routerFixture, method, target, token string) *httptest.ResponseRec
 	return rec
 }
 
-// With auth.enabled every data/metadata route must reject a request that
-// carries no token (GHSA-fhf5-m388-4w4p catalog bypass, GHSA-fmr6-9j48-xrqp
-// unauthenticated /_PLUGIN).
-func TestRegisterRoutes_AuthEnabled_RejectsMissingToken(t *testing.T) {
-	cases := []struct {
-		description string
-		method      string
-		target      string
-		skipWindows bool
-	}{
-		{description: "list databases without token -> 401", method: http.MethodGet, target: "/databases"},
-		{description: "list schemas without token -> 401", method: http.MethodGet, target: "/schemas"},
-		{description: "list tables without token -> 401", method: http.MethodGet, target: "/tables"},
-		{description: "list tables of database/schema without token -> 401", method: http.MethodGet, target: "/prest-test/public"},
-		{description: "show table structure without token -> 401", method: http.MethodGet, target: "/show/prest-test/public/test"},
-		{description: "plugin handler without token -> 401", method: http.MethodGet, target: "/_PLUGIN/hello/Hello", skipWindows: true},
-		{description: "MCP POST without token -> 401", method: http.MethodPost, target: "/_mcp"},
-		{description: "MCP GET without token -> 401", method: http.MethodGet, target: "/_mcp"},
-		{description: "CRUD select without token -> 401", method: http.MethodGet, target: "/prest-test/public/test"},
-		{description: "CRUD insert without token -> 401", method: http.MethodPost, target: "/prest-test/public/test"},
-		{description: "batch insert without token -> 401", method: http.MethodPost, target: "/batch/prest-test/public/test"},
-		{description: "custom query script without token -> 401", method: http.MethodGet, target: "/_QUERIES/queries/get_all"},
-	}
-	for _, tc := range cases {
+// miniship: upstream v2.5.2 puts its catalog routes, /_PLUGIN and /_mcp behind
+// an auth stack (GHSA-fhf5-m388-4w4p, GHSA-fmr6-9j48-xrqp) and keeps the
+// stored-query registry behind adminRoute (GHSA-2x9q-r7j9-g85f). rest does not
+// register any of them (patch 4), so these subjects hold the stronger answer:
+// with auth on or off, with a token or without one, every one of those
+// addresses is not found. router/surface_test.go walks the route table; these
+// send the advisories' own requests through it.
+
+// advisoryTargets is every request the three advisories make, as upstream's
+// own router tests list them. A GET of three segments is rest's table read,
+// {database}/{schema}/{table}, which takes /_PLUGIN/hello/Hello as a Database
+// called _PLUGIN; tableRead marks those, and no plugin, catalog or query code
+// is behind them.
+var advisoryTargets = []struct {
+	description string
+	method      string
+	target      string
+	tableRead   bool
+}{
+	{description: "list databases (GHSA-fhf5)", method: http.MethodGet, target: "/databases"},
+	{description: "list schemas (GHSA-fhf5)", method: http.MethodGet, target: "/schemas"},
+	{description: "list tables (GHSA-fhf5)", method: http.MethodGet, target: "/tables"},
+	{description: "list tables of database/schema (GHSA-fhf5)", method: http.MethodGet, target: "/prest-test/public"},
+	{description: "show table structure (GHSA-fhf5)", method: http.MethodGet, target: "/show/prest-test/public/test"},
+	{description: "plugin handler (GHSA-fmr6)", method: http.MethodGet, target: "/_PLUGIN/hello/Hello", tableRead: true},
+	{description: "MCP POST", method: http.MethodPost, target: "/_mcp"},
+	{description: "MCP GET", method: http.MethodGet, target: "/_mcp"},
+	{description: "CRUD insert", method: http.MethodPost, target: "/prest-test/public/test"},
+	{description: "batch insert", method: http.MethodPost, target: "/batch/prest-test/public/test"},
+	{description: "custom query script (GHSA-2x9q)", method: http.MethodGet, target: "/_QUERIES/queries/get_all", tableRead: true},
+	{description: "custom query script, written by POST (GHSA-2x9q)", method: http.MethodPost, target: "/_QUERIES/rpt/d"},
+	{description: "list registry (GHSA-2x9q)", method: http.MethodGet, target: "/_QUERIES/registry"},
+	{description: "create registry entry (GHSA-2x9q)", method: http.MethodPost, target: "/_QUERIES/registry"},
+	{description: "list registry for database (GHSA-2x9q)", method: http.MethodGet, target: "/_QUERIES/registry/prest-test", tableRead: true},
+	{description: "get registry entry (GHSA-2x9q)", method: http.MethodGet, target: "/_QUERIES/registry/loc/name"},
+	{description: "update registry entry (GHSA-2x9q)", method: http.MethodPut, target: "/_QUERIES/registry/loc/name"},
+	{description: "delete registry entry (GHSA-2x9q)", method: http.MethodDelete, target: "/_QUERIES/registry/prest-test/loc/name"},
+	{description: "the queries table, written through the table route (GHSA-2x9q)", method: http.MethodPost, target: "/prest/public/prest_queries"},
+}
+
+// Without a token, with auth on, none of them is served: a table read is
+// refused by its stack before any handler runs, and the rest are not found.
+func TestRegisterRoutes_AuthEnabled_AdvisoryRoutesAreNotServed(t *testing.T) {
+	for _, tc := range advisoryTargets {
 		t.Run(tc.description, func(t *testing.T) {
-			if tc.skipWindows && runtime.GOOS == "windows" {
-				t.Skip("/_PLUGIN is not registered on windows")
-			}
-			f := newTestRouter(t, true)
+			f := newTestRouterWithRegistry(t, true, true)
 			rec := serve(f, tc.method, tc.target, "")
-			require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+			want := http.StatusNotFound
+			if tc.tableRead {
+				want = http.StatusUnauthorized
+			}
+			require.Equal(t, want, rec.Code, "body: %s", rec.Body.String())
 		})
 	}
 }
 
-// Liveness probes stay public even when auth is enabled.
+// With auth off, as rest runs (PREST_AUTH_ENABLED=false), none is served: a
+// table read names a Database rest was not given, and is not found.
+func TestRegisterRoutes_AuthDisabled_AdvisoryRoutesAreNotServed(t *testing.T) {
+	for _, tc := range advisoryTargets {
+		t.Run(tc.description, func(t *testing.T) {
+			f := newTestRouterWithRegistry(t, false, true)
+			f.db.EXPECT().IsRegistered(gomock.Any()).Return(false).AnyTimes()
+			f.adapter.EXPECT().TablePermissions(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+			rec := serve(f, tc.method, tc.target, "")
+			require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+}
+
+// The table read rest keeps sits behind the CRUD stack, so with auth on a
+// request without a token is refused before any handler runs.
+func TestRegisterRoutes_AuthEnabled_TheTableReadRejectsMissingToken(t *testing.T) {
+	f := newTestRouter(t, true)
+	rec := serve(f, http.MethodGet, "/prest-test/public/test", "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+}
+
+// Liveness probes stay public even when auth is enabled, and touch no
+// Database (patch 3): the pinger is given no expectation.
 func TestRegisterRoutes_AuthEnabled_HealthIsPublic(t *testing.T) {
 	f := newTestRouter(t, true)
-	f.pinger.EXPECT().Ping(gomock.Any()).Return(nil)
 
 	rec := serve(f, http.MethodGet, "/_health", "")
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-}
-
-// A valid token lets catalog listings through the stack to the handler; the
-// mocked builder fails, so reaching the handler shows up as 400, not 401.
-func TestRegisterRoutes_AuthEnabled_ValidTokenReachesCatalogHandler(t *testing.T) {
-	f := newTestRouter(t, true)
-	f.builder.EXPECT().WhereByRequest(gomock.Any(), gomock.Any()).
-		Return("", nil, errors.New("builder stub")).Times(3)
-	token := signRouterTestJWT(t, "alice")
-
-	for _, target := range []string{"/databases", "/schemas", "/tables"} {
-		rec := serve(f, http.MethodGet, target, token)
-		require.Equal(t, http.StatusBadRequest, rec.Code, "%s body: %s", target, rec.Body.String())
-	}
-}
-
-// /show/{db}/{schema}/{table} applies the table ACL: an authenticated user
-// without read permission is refused before the handler runs.
-func TestRegisterRoutes_AuthEnabled_ShowAppliesTableACL(t *testing.T) {
-	token := signRouterTestJWT(t, "alice")
-
-	t.Run("denied by ACL -> 401", func(t *testing.T) {
-		f := newTestRouter(t, true)
-		f.adapter.EXPECT().
-			TablePermissions("prest-test", "public", "test", "read", "alice").
-			Return(false)
-		rec := serve(f, http.MethodGet, "/show/prest-test/public/test", token)
-		require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
-	})
-
-	t.Run("allowed by ACL -> reaches handler", func(t *testing.T) {
-		f := newTestRouter(t, true)
-		f.adapter.EXPECT().
-			TablePermissions("prest-test", "public", "test", "read", "alice").
-			Return(true)
-		// Unregistered database makes the handler answer 400, proving it ran.
-		f.db.EXPECT().IsRegistered("prest-test").Return(false)
-		rec := serve(f, http.MethodGet, "/show/prest-test/public/test", token)
-		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-	})
-}
-
-// With auth disabled the catalog routes keep working without a token: each
-// reaches its handler (which fails on the stubbed ports with 400).
-func TestRegisterRoutes_AuthDisabled_CatalogRoutesOpen(t *testing.T) {
-	cases := []struct {
-		description string
-		target      string
-		setup       func(f *routerFixture)
-	}{
-		{
-			description: "list databases reaches handler -> 400 from builder stub",
-			target:      "/databases",
-			setup: func(f *routerFixture) {
-				f.builder.EXPECT().WhereByRequest(gomock.Any(), gomock.Any()).Return("", nil, errors.New("stub"))
-			},
-		},
-		{
-			description: "list schemas reaches handler -> 400 from builder stub",
-			target:      "/schemas",
-			setup: func(f *routerFixture) {
-				f.builder.EXPECT().WhereByRequest(gomock.Any(), gomock.Any()).Return("", nil, errors.New("stub"))
-			},
-		},
-		{
-			description: "list tables reaches handler -> 400 from builder stub",
-			target:      "/tables",
-			setup: func(f *routerFixture) {
-				f.builder.EXPECT().WhereByRequest(gomock.Any(), gomock.Any()).Return("", nil, errors.New("stub"))
-			},
-		},
-		{
-			description: "list tables by database/schema reaches handler -> 400 unregistered db",
-			target:      "/prest-test/public",
-			setup: func(f *routerFixture) {
-				f.db.EXPECT().IsRegistered("prest-test").Return(false)
-			},
-		},
-		{
-			description: "show table passes ACL (anonymous) and reaches handler -> 400 unregistered db",
-			target:      "/show/prest-test/public/test",
-			setup: func(f *routerFixture) {
-				f.adapter.EXPECT().TablePermissions("prest-test", "public", "test", "read", "").Return(true)
-				f.db.EXPECT().IsRegistered("prest-test").Return(false)
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.description, func(t *testing.T) {
-			f := newTestRouter(t, false)
-			tc.setup(f)
-			rec := serve(f, http.MethodGet, tc.target, "")
-			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-		})
-	}
-}
-
-// Query-registry admin routes (registered only with database storage) sit
-// behind adminRoute and reject requests without a token.
-func TestRegisterRoutes_AuthEnabled_QueryRegistryRejectsMissingToken(t *testing.T) {
-	cases := []struct {
-		description string
-		method      string
-		target      string
-	}{
-		{description: "list registry without token -> 401", method: http.MethodGet, target: "/_QUERIES/registry"},
-		{description: "create registry entry without token -> 401", method: http.MethodPost, target: "/_QUERIES/registry"},
-		{description: "list registry for database without token -> 401", method: http.MethodGet, target: "/_QUERIES/registry/prest-test"},
-		{description: "get registry entry without token -> 401", method: http.MethodGet, target: "/_QUERIES/registry/loc/name"},
-		{description: "update registry entry without token -> 401", method: http.MethodPut, target: "/_QUERIES/registry/loc/name"},
-		{description: "delete registry entry without token -> 401", method: http.MethodDelete, target: "/_QUERIES/registry/prest-test/loc/name"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.description, func(t *testing.T) {
-			f := newTestRouterWithRegistry(t, true, true)
-			rec := serve(f, tc.method, tc.target, "")
-			require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
-		})
-	}
 }
