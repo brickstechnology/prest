@@ -2,4 +2,5 @@ allowBuilds:
   msw: false
 
 overrides:
+  "seroval": "1.6.11"
   "undici": "8.12.2"
