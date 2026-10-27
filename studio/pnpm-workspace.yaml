@@ -1,2 +1,5 @@
 allowBuilds:
   msw: false
+
+overrides:
+  "undici": "8.12.2"
