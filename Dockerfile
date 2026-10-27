@@ -5,7 +5,7 @@
 ARG GO_VERSION=1.26
 
 # --- Studio frontend ---
-FROM node:24-bookworm AS studio
+FROM node:24.22.1-bookworm AS studio
 WORKDIR /workspace/studio
 RUN corepack enable
 COPY studio/package.json studio/pnpm-lock.yaml studio/pnpm-workspace.yaml ./
