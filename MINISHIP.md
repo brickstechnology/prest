@@ -555,6 +555,22 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_operators_test.go`,
     `MINISHIP.md`
 
+27. **The response media type of PostgREST 14** — miniship-cloud#1886, spec
+    #1869, ADR 0074: `/rest/v1` negotiates the Accept as PostgREST v14.0
+    does (`MediaType.hs` decodeMediaType, `Plan.hs` negotiateContent), on table
+    reads, writes and `rpc`. `text/csv` is `asCsvF` (the header from the first
+    row, the rows as the Database writes a record), `application/geo+json` is
+    `asGeoJsonF`, which without PostGIS fails with the Database's 42883 and a 404 as PostgREST's does, and `nulls=stripped` is
+    `json_strip_nulls`. Anything rest cannot produce, the plan types of
+    `.explain()` included (plans are off, as on a default Supabase Project), is
+    `406 PGRST107` with PostgREST's message.
+    Paths: `controllers/postgrest_media.go`, `controllers/postgrest_media_test.go`,
+    `controllers/postgrest_call.go`, `controllers/postgrest_mutation.go`,
+    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `controllers/postgrest_write.go`, `middlewares/utils.go`,
+    `integration/postgres/anonymousrole/postgrest_media_test.go`,
+    `MINISHIP.md`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

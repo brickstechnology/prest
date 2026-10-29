@@ -105,7 +105,11 @@ func renderFormat(w http.ResponseWriter, recorder *httptest.ResponseRecorder, fo
 		w.WriteHeader(recorder.Code)
 		w.Write([]byte(xmlStr))
 	default:
-		w.Header().Set("Content-Type", "application/json")
+		// miniship (miniship-cloud#1886): the media types /rest/v1 answers
+		// besides JSON keep the Content-Type the handler chose.
+		if !pgrMediaContentType(recorder.Header().Get("Content-Type")) {
+			w.Header().Set("Content-Type", "application/json")
+		}
 		w.WriteHeader(recorder.Code)
 		w.Write(byt)
 	}
@@ -162,4 +166,16 @@ func MatchURL(url string, whitelist []string) (match bool, err error) {
 		}
 	}
 	return
+}
+
+// pgrMediaContentType is whether a handler answered in one of the media types
+// of PostgREST that are not application/json: CSV, GeoJSON, and the vendored
+// object and array types, whose Content-Type names the null strip.
+func pgrMediaContentType(contentType string) bool {
+	for _, prefix := range []string{"text/csv", "application/geo+json", "application/vnd.pgrst."} {
+		if strings.HasPrefix(contentType, prefix) {
+			return true
+		}
+	}
+	return false
 }
