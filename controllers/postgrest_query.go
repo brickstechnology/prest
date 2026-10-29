@@ -2,10 +2,9 @@ package controllers
 
 // miniship (miniship-cloud#1302, public ADR 0077): PostgREST's query language
 // for a read, as the Supabase SDK's database client writes it. Reads only:
-// the columns named, the filters eq, neq, gt, gte, lt, lte, like, ilike, is,
-// in, the array, range and jsonb operators cs, cd, ov, sl, sr, nxl, nxr and adj
-// and the full-text operators fts, plfts, phfts and wfts (#1427), each of them
-// under not., an or=( … ) group, order, limit and offset.
+// the columns named, every filter operator of PostgREST 14 (#1887,
+// postgrest_operators.go), each of them under not., an or=( … ) group, order,
+// limit and offset.
 // Writes and function calls are their own tickets and have their own files
 // (#1303 postgrest_write.go, #1304 postgrest_call.go), which parse their
 // filters here. A read that embeds another table, an alias, a cast and a json
