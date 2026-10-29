@@ -534,6 +534,27 @@ you mean the files, and the directory only when the patch owns all of it.
     `app/startup_internal_test.go`, `middlewares/utils.go`,
     `router/router_test.go`
 
+26. **Every filter operator and logic tree of PostgREST 14** —
+    miniship-cloud#1887, spec #1869: the read's filters (patch 19) are parsed as
+    QueryParams.hs v14.18 parses them (`pOpExpr`, `pListVal`, `pLogicTree`,
+    `pLogicSingleVal`) in `controllers/postgrest_operators.go`, and answer
+    `isdistinct` (`IS DISTINCT FROM`), `match` and `imatch` (`~`, `~*`),
+    `(any)` and `(all)` on exactly the quantifiable operators `eq`, `gt`,
+    `gte`, `lt`, `lte`, `like`, `ilike`, `match` and `imatch`
+    (`= ANY($1)`, `LIKE ALL($1)`; the value is one array-literal parameter),
+    and `is.not_null`, with `is` values in any case. `in` is `= ANY($1)` over
+    one array-literal parameter whatever its length, and `in.()` is an empty
+    array, as `pgFmtFilter` does. Every refusal is `PGRST100` with PostgREST's
+    message (`"failed to parse filter (…)" (line 1, column N)`) and details
+    (`unexpected "x" expecting "not" or operator (eq, gt, ...)`). As in
+    PostgREST, text after a complete `is` value or `in` list is ignored.
+    Paths: `controllers/postgrest_operators.go`,
+    `controllers/postgrest_operators_parse_test.go`,
+    `controllers/postgrest_operators_test.go`,
+    `controllers/postgrest_query.go`,
+    `integration/postgres/anonymousrole/postgrest_operators_test.go`,
+    `MINISHIP.md`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue
