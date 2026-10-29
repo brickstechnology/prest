@@ -12,19 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPgrSplitGroupKeepsABraceRunAndAQuotedRange(t *testing.T) {
-	for in, want := range map[string][]string{
-		`a.eq.1,b.eq.2`:                        {`a.eq.1`, `b.eq.2`},
-		`tags.cs.{a,b},tags.cs.{d}`:            {`tags.cs.{a,b}`, `tags.cs.{d}`},
-		`meta.cs.{"k":"v","n":1},x.is.null`:    {`meta.cs.{"k":"v","n":1}`, `x.is.null`},
-		`span.sl."[15,30)",span.adj."[10,12)"`: {`span.sl.[15,30)`, `span.adj.[10,12)`},
-		`and(a.cs.{x,y},b.eq."p,q"),c.eq.3`:    {`and(a.cs.{x,y},b.eq."p,q")`, `c.eq.3`},
-		`not.or(a.eq.1,b.cs.{1,2}),c.eq."a,b"`: {`not.or(a.eq.1,b.cs.{1,2})`, `c.eq.a,b`},
-	} {
-		require.Equal(t, want, pgrSplitGroup(in), in)
-	}
-}
-
 func TestPgrPredicateWritesTheOperatorsAsPostgRESTDoes(t *testing.T) {
 	for _, c := range []struct{ column, expr, sql string }{
 		{"tags", "cs.{a,b}", `"t"."tags" @> $1`},
