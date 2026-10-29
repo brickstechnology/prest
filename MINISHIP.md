@@ -560,12 +560,10 @@ you mean the files, and the directory only when the patch owns all of it.
     does (`MediaType.hs` decodeMediaType, `Plan.hs` negotiateContent), on table
     reads, writes and `rpc`. `text/csv` is `asCsvF` (the header from the first
     row, the rows as the Database writes a record), `application/geo+json` is
-    `asGeoJsonF` where PostGIS is installed, and `nulls=stripped` is
+    `asGeoJsonF`, which without PostGIS fails with the Database's 42883 and a 404 as PostgREST's does, and `nulls=stripped` is
     `json_strip_nulls`. Anything rest cannot produce, the plan types of
     `.explain()` included (plans are off, as on a default Supabase Project), is
-    `406 PGRST107` with PostgREST's message. Without PostGIS `geo+json` is
-    also `406 PGRST107`, where PostgREST would answer `404 42883` from the
-    missing function.
+    `406 PGRST107` with PostgREST's message.
     Paths: `controllers/postgrest_media.go`, `controllers/postgrest_media_test.go`,
     `controllers/postgrest_call.go`, `controllers/postgrest_mutation.go`,
     `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,

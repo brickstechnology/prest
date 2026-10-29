@@ -120,11 +120,6 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 	var total int64
 	run := func(reader adapters.CallerReader) error {
 		return reader.ReadAsCallerCtx(ctx, caller, func(tx *sql.Tx) error {
-			chosen, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), media)
-			if err != nil {
-				return err
-			}
-			media = chosen
 			// A retry builds the read again, so the arguments are the first
 			// attempt's only once.
 			again := *read
@@ -177,7 +172,14 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Errorln(logsafe.Error(err))
-		pgrWriteError(w, pgrReadFailure(err))
+		failure := pgrReadFailure(err)
+		var pqErr *pq.Error
+		if media.kind == pgrMediaGeoJSON && errors.As(err, &pqErr) {
+			// PostgREST runs the query and passes the Database's refusal on
+			// as it is: without PostGIS, 42883 and a 404.
+			failure = pgrWriteFailure(err, true)
+		}
+		pgrWriteError(w, failure)
 		return
 	}
 

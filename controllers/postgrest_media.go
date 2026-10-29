@@ -17,8 +17,6 @@ package controllers
 // and Query/SqlFragment.hs (asCsvF, asGeoJsonF, asJsonF, addNullsToSnip).
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"sort"
@@ -93,18 +91,13 @@ type pgrAcceptEntry struct {
 // Accept entry (in quality order) rest can produce, or 406 PGRST107 listing
 // every entry as PostgREST writes it. No Accept is */*.
 func pgrNegotiate(accept string) (pgrMedia, error) {
-	return pgrNegotiateWithout(accept, -1)
-}
-
-// pgrNegotiateWithout is pgrNegotiate with one kind taken from what can be
-// produced; -1 takes none. A missing Accept is */*.
-func pgrNegotiateWithout(accept string, without pgrMediaKind) (pgrMedia, error) {
+	// A missing Accept is */*.
 	entries := []pgrAcceptEntry{{media: pgrMedia{kind: pgrMediaJSON}, ok: true, mime: "*/*"}}
 	if accept != "" {
 		entries = pgrParseAccept(accept)
 	}
 	for _, entry := range entries {
-		if entry.ok && entry.media.kind != without {
+		if entry.ok {
 			return entry.media, nil
 		}
 	}
@@ -370,25 +363,4 @@ func (m pgrMedia) empty() string {
 		return `{"type" : "FeatureCollection", "features" : []}`
 	}
 	return "\n"
-}
-
-// hasGeoJSON is the statement that tells whether ST_AsGeoJSON takes a row,
-// which is what PostGIS installed and on the search path means.
-const hasGeoJSON = `SELECT to_regprocedure('st_asgeojson(record)') IS NOT NULL`
-
-// pgrResolveGeoJSON keeps a geo+json answer only where PostGIS is installed.
-// Where it is not, the type is one this Database cannot produce, so the next
-// Accept entry rest can produce answers, and 406 PGRST107 when there is none.
-func pgrResolveGeoJSON(ctx context.Context, tx *sql.Tx, accept string, media pgrMedia) (pgrMedia, error) {
-	if media.kind != pgrMediaGeoJSON {
-		return media, nil
-	}
-	var installed bool
-	if err := tx.QueryRowContext(ctx, hasGeoJSON).Scan(&installed); err != nil {
-		return media, err
-	}
-	if installed {
-		return media, nil
-	}
-	return pgrNegotiateWithout(accept, pgrMediaGeoJSON)
 }

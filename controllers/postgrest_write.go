@@ -249,13 +249,6 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	run := func(writer adapters.CallerWriter) error {
 		result = pgrMutationResult{}
 		return writer.WriteAsCallerCtx(ctx, caller, func(tx *sql.Tx) error {
-			if prefer.representation {
-				chosen, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), m.media)
-				if err != nil {
-					return err
-				}
-				m.media = chosen
-			}
 			schema, err := pgrLoadColumns(ctx, tx, table)
 			if err != nil {
 				return err

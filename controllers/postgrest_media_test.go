@@ -82,18 +82,6 @@ func TestPgrNegotiate_theEntriesAreListedInQualityOrder(t *testing.T) {
 	require.EqualError(t, err, "None of these media types are available: application/x-bogus, application/octet-stream, text/plain")
 }
 
-func TestPgrNegotiate_geojsonWithoutPostGISFallsToTheNextEntryOr406(t *testing.T) {
-	media, err := pgrNegotiateWithout("application/geo+json, application/json;q=0.5", pgrMediaGeoJSON)
-	require.NoError(t, err)
-	require.Equal(t, pgrMediaJSON, media.kind)
-
-	_, err = pgrNegotiateWithout("application/geo+json", pgrMediaGeoJSON)
-	refused := err.(*pgrError)
-	require.Equal(t, 406, refused.status)
-	require.Equal(t, "PGRST107", refused.code)
-	require.Equal(t, "None of these media types are available: application/geo+json", refused.message)
-}
-
 func TestPgrMedia_aggregateIsParameterlessSQLForEachBody(t *testing.T) {
 	source := `SELECT "t"."name" FROM "public"."countries" AS "t" LIMIT 2 OFFSET 0`
 

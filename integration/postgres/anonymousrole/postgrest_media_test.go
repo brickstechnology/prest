@@ -310,32 +310,35 @@ func postgisAvailable(t *testing.T, db *sql.DB) (installed, available bool) {
 	return installed, available
 }
 
-func TestPostgRESTMedia_geojsonWithoutPostGISIs406PGRST107(t *testing.T) {
+// refusedWithoutPostGIS holds an answer to the Database's own refusal, which
+// PostgREST passes on: ST_AsGeoJSON is not a function, 42883, a 404.
+func refusedWithoutPostGIS(t *testing.T, status int, body string) {
+	t.Helper()
+	require.Equal(t, http.StatusNotFound, status, body)
+	refusal := refusalOf(t, body)
+	require.Equal(t, "42883", refusal["code"], body)
+	require.Contains(t, refusal["message"], "st_asgeojson", body)
+	require.Contains(t, refusal, "details")
+	require.Contains(t, refusal, "hint")
+}
+
+func TestPostgRESTMedia_geojsonWithoutPostGISIsTheDatabasesRefusal(t *testing.T) {
 	f := newCallFixture(t)
 	stageCountries(t, f.db)
 	if installed, _ := postgisAvailable(t, f.db); installed {
 		t.Skip("PostGIS is installed in this Database")
 	}
 	geo := accepting("application/geo+json")
-	want := `{"code":"PGRST107","details":null,"hint":null,"message":"None of these media types are available: application/geo+json"}`
 
 	status, headers, body := send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id", f.anon, geo, "")
-	require.Equal(t, http.StatusNotAcceptable, status, body)
-	require.JSONEq(t, want, body)
+	refusedWithoutPostGIS(t, status, body)
 	require.Equal(t, "application/json", headers.Get("Content-Type"))
 
 	status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgc_titles", f.a, geo, `{"min_id":1}`)
-	require.Equal(t, http.StatusNotAcceptable, status, body)
-	require.JSONEq(t, want, body)
-
-	// The next entry the server can produce answers where the Accept has one.
-	status, headers, body = send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id&id=eq.1", f.anon, accepting("application/geo+json, application/json;q=0.5"), "")
-	require.Equal(t, http.StatusOK, status, body)
-	require.JSONEq(t, `[{"id":1}]`, body)
-	require.Equal(t, "application/json", headers.Get("Content-Type"))
+	refusedWithoutPostGIS(t, status, body)
 }
 
-func TestPostgRESTMedia_geojsonWithoutPostGISRefusesAWriteBeforeItRuns(t *testing.T) {
+func TestPostgRESTMedia_geojsonWithoutPostGISChangesNothingOnAWrite(t *testing.T) {
 	f := newNotesFixture(t)
 	if installed, _ := postgisAvailable(t, f.db); installed {
 		t.Skip("PostGIS is installed in this Database")
@@ -343,8 +346,7 @@ func TestPostgRESTMedia_geojsonWithoutPostGISRefusesAWriteBeforeItRuns(t *testin
 	before := theNotes(t, f.db)
 	status, _, body := send(t, f.rest, http.MethodPost, "/rest/v1/"+notes+"?select=id", f.svc,
 		map[string]string{"Accept": "application/geo+json", "Prefer": "return=representation"}, `{"title":"never"}`)
-	require.Equal(t, http.StatusNotAcceptable, status, body)
-	require.JSONEq(t, `{"code":"PGRST107","details":null,"hint":null,"message":"None of these media types are available: application/geo+json"}`, body)
+	refusedWithoutPostGIS(t, status, body)
 	require.Equal(t, before, theNotes(t, f.db))
 }
 

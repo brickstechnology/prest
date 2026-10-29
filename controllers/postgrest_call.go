@@ -414,12 +414,6 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	var result pgrCallResult
 	exec := func(tx *sql.Tx) error {
 		result = pgrCallResult{}
-		resolved, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), media)
-		if err != nil {
-			return err
-		}
-		media = resolved
-		wantsObject = media.object()
 		found, err := pgrLoadRoutines(ctx, tx, name)
 		if err != nil {
 			return err
