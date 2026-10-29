@@ -2,10 +2,9 @@ package controllers
 
 // miniship (miniship-cloud#1302, public ADR 0077): PostgREST's query language
 // for a read, as the Supabase SDK's database client writes it. Reads only:
-// the columns named, the filters eq, neq, gt, gte, lt, lte, like, ilike, is,
-// in, the array, range and jsonb operators cs, cd, ov, sl, sr, nxl, nxr and adj
-// and the full-text operators fts, plfts, phfts and wfts (#1427), each of them
-// under not., an or=( … ) group, order, limit and offset.
+// the columns named, every filter operator of PostgREST 14 (#1887,
+// postgrest_operators.go), each of them under not., an or=( … ) group, order,
+// limit and offset.
 // Writes and function calls are their own tickets and have their own files
 // (#1303 postgrest_write.go, #1304 postgrest_call.go), which parse their
 // filters here. A read that embeds another table, an alias, a cast and a json
@@ -78,52 +77,6 @@ func pgrSplit(s string) []string {
 		switch {
 		case ch == '"':
 			quoted = !quoted
-		case ch == '(' && !quoted:
-			depth++
-			current.WriteRune(ch)
-		case ch == ')' && !quoted:
-			depth--
-			current.WriteRune(ch)
-		case ch == ',' && !quoted && depth == 0:
-			out = append(out, current.String())
-			current.Reset()
-		default:
-			current.WriteRune(ch)
-		}
-	}
-	return append(out, current.String())
-}
-
-// pgrSplitGroup splits the inside of an or / and group on its commas, as
-// QueryParams.hs's `pLogicTree` does: a value is a double-quoted run, or a
-// `{…}` run (a Postgres array or a flat json object, `pPgArray`), or the text up
-// to the next comma or closing parenthesis. A `{…}` run is kept as written, with
-// its quotes. A quoted run loses its quotes at the group's own level and keeps
-// them inside a nested group, which splits it again.
-func pgrSplitGroup(s string) []string {
-	var out []string
-	var current strings.Builder
-	depth := 0
-	quoted := false
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		ch := runes[i]
-		switch {
-		case ch == '{' && !quoted && i > 0 && runes[i-1] == '.':
-			end := i
-			for end < len(runes) && runes[end] != '}' {
-				end++
-			}
-			if end == len(runes) {
-				end--
-			}
-			current.WriteString(string(runes[i : end+1]))
-			i = end
-		case ch == '"':
-			quoted = !quoted
-			if depth > 0 {
-				current.WriteRune(ch)
-			}
 		case ch == '(' && !quoted:
 			depth++
 			current.WriteRune(ch)
@@ -264,17 +217,8 @@ func (q *pgrRead) filter(key, value string) error {
 	var predicate string
 	var err error
 	switch key {
-	case "or":
-		predicate, err = q.group(value, " OR ")
-	case "and":
-		predicate, err = q.group(value, " AND ")
-	case "not.or", "not.and":
-		join := " OR "
-		if key == "not.and" {
-			join = " AND "
-		}
-		predicate, err = q.group(value, join)
-		predicate = "NOT " + predicate
+	case "or", "and", "not.or", "not.and":
+		predicate, err = q.logicTree(key, value)
 	default:
 		predicate, err = q.predicate(key, value)
 	}
@@ -285,175 +229,18 @@ func (q *pgrRead) filter(key, value string) error {
 	return nil
 }
 
-// predicate turns one filter, `op.value` or `not.op.value` on column, into SQL.
+// predicate turns one filter, `op.value` or `not.op.value` on column, into SQL
+// (postgrest_operators.go).
 func (q *pgrRead) predicate(column, expr string) (string, error) {
 	parsed, err := pgrParseColumn(column)
 	if err != nil {
 		return "", err
 	}
-	negate := false
-	if rest, found := strings.CutPrefix(expr, "not."); found {
-		negate, expr = true, rest
+	parsedExpr, err := pgrParseFilter(expr)
+	if err != nil {
+		return "", err
 	}
-	op, value, found := strings.Cut(expr, ".")
-	if !found {
-		return "", pgrRefuse("a filter is written column=operator.value")
-	}
-	c := parsed.sql(q.tableAlias())
-	var text string
-	switch op {
-	case "eq":
-		text = c + " = " + q.arg(value)
-	case "neq":
-		text = c + " <> " + q.arg(value)
-	case "gt":
-		text = c + " > " + q.arg(value)
-	case "gte":
-		text = c + " >= " + q.arg(value)
-	case "lt":
-		text = c + " < " + q.arg(value)
-	case "lte":
-		text = c + " <= " + q.arg(value)
-	case "like":
-		text = c + " LIKE " + q.arg(strings.ReplaceAll(value, "*", "%"))
-	case "ilike":
-		text = c + " ILIKE " + q.arg(strings.ReplaceAll(value, "*", "%"))
-	case "is":
-		switch strings.ToLower(value) {
-		case "null":
-			text = c + " IS NULL"
-		case "true":
-			text = c + " IS TRUE"
-		case "false":
-			text = c + " IS FALSE"
-		case "unknown":
-			text = c + " IS UNKNOWN"
-		default:
-			return "", pgrRefuse("is takes null, true, false or unknown")
-		}
-	case "in":
-		items, err := pgrList(value)
-		if err != nil {
-			return "", err
-		}
-		if len(items) == 0 {
-			text = "FALSE"
-			break
-		}
-		holes := make([]string, 0, len(items))
-		for _, item := range items {
-			holes = append(holes, q.arg(item))
-		}
-		text = c + " IN (" + strings.Join(holes, ", ") + ")"
-	default:
-		if symbol, ok := pgrSimpleOperators[op]; ok {
-			// PostgREST hands the value to the Database as an unknown literal
-			// (SqlFragment.hs, pgFmtFilter, `Op op val`), so `{a,b}`, a json
-			// value and a range literal are read by the column's own type; so
-			// is a parameter. A value that does not parse is the Database's
-			// 22P02, and an operator the column's type lacks is its 42883.
-			text = c + " " + symbol + " " + q.arg(value)
-			break
-		}
-		fts := pgrFtsOperator.FindStringSubmatch(op)
-		if fts == nil {
-			return "", pgrRefuse("this operator is not answered: the read answers eq, neq, gt, gte, lt, lte, like, ilike, is, in, cs, cd, ov, sl, sr, nxl, nxr, adj, fts, plfts, phfts and wfts")
-		}
-		// `@@ to_tsquery(config, value)`, with the config left out when the
-		// filter names none (SqlFragment.hs, `Fts op lang val`; QueryParams.hs,
-		// `pFts`, where the config is an identifier in parentheses).
-		call := pgrFtsFunctions[fts[1]] + "("
-		if config := strings.TrimSpace(fts[2]); config != "" {
-			call += q.arg(config) + ", "
-		} else if fts[2] != "" {
-			return "", pgrRefuse("a text search configuration is a plain name")
-		}
-		text = c + " @@ " + call + q.arg(value) + ")"
-	}
-	if negate {
-		text = "NOT (" + text + ")"
-	}
-	return text, nil
-}
-
-// pgrSimpleOperators are the operators that take one value as it is written, and
-// the Database's operator for each (SqlFragment.hs, `simpleOperator`): contains,
-// contained by, overlap, strictly left of, strictly right of, does not extend
-// to the left of, does not extend to the right of, adjacent to.
-var pgrSimpleOperators = map[string]string{
-	"cs":  "@>",
-	"cd":  "<@",
-	"ov":  "&&",
-	"sl":  "<<",
-	"sr":  ">>",
-	"nxl": "&>",
-	"nxr": "&<",
-	"adj": "-|-",
-}
-
-// pgrFtsOperator reads a full-text operator and its optional configuration,
-// `fts(english)` (QueryParams.hs, `pFts`: the configuration is an identifier of
-// letters, digits, _, $ and spaces).
-var pgrFtsOperator = regexp.MustCompile(`^(fts|plfts|phfts|wfts)(?:\(([A-Za-z0-9_ $]+)\))?$`)
-
-// pgrFtsFunctions is the query function each full-text operator calls
-// (SqlFragment.hs, `ftsOperator`).
-var pgrFtsFunctions = map[string]string{
-	"fts":   "to_tsquery",
-	"plfts": "plainto_tsquery",
-	"phfts": "phraseto_tsquery",
-	"wfts":  "websearch_to_tsquery",
-}
-
-// pgrList reads `(a,b,"c,d")`.
-func pgrList(value string) ([]string, error) {
-	v := strings.TrimSpace(value)
-	if !strings.HasPrefix(v, "(") || !strings.HasSuffix(v, ")") {
-		return nil, pgrRefuse("an in list is written (a,b,c)")
-	}
-	inner := v[1 : len(v)-1]
-	if inner == "" {
-		return nil, nil
-	}
-	return pgrSplit(inner), nil
-}
-
-// group reads `(a.eq.1,b.gt.2)`, and a nested `and(…)`, `or(…)`, `not.and(…)`
-// or `not.or(…)` inside it, into one parenthesised group.
-func (q *pgrRead) group(value, join string) (string, error) {
-	v := strings.TrimSpace(value)
-	if !strings.HasPrefix(v, "(") || !strings.HasSuffix(v, ")") {
-		return "", pgrRefuse("a group is written or=(a.eq.1,b.eq.2)")
-	}
-	var predicates []string
-	for _, part := range pgrSplitGroup(v[1 : len(v)-1]) {
-		part = strings.TrimSpace(part)
-		var predicate string
-		var err error
-		switch {
-		case strings.HasPrefix(part, "or("):
-			predicate, err = q.group(part[len("or"):], " OR ")
-		case strings.HasPrefix(part, "and("):
-			predicate, err = q.group(part[len("and"):], " AND ")
-		case strings.HasPrefix(part, "not.or("):
-			predicate, err = q.group(part[len("not.or"):], " OR ")
-			predicate = "NOT " + predicate
-		case strings.HasPrefix(part, "not.and("):
-			predicate, err = q.group(part[len("not.and"):], " AND ")
-			predicate = "NOT " + predicate
-		default:
-			column, expr, found := strings.Cut(part, ".")
-			if !found {
-				return "", pgrRefuse("an item of a group is written column.operator.value")
-			}
-			predicate, err = q.predicate(column, expr)
-		}
-		if err != nil {
-			return "", err
-		}
-		predicates = append(predicates, predicate)
-	}
-	return "(" + strings.Join(predicates, join) + ")", nil
+	return parsedExpr.sql(q, parsed.sql(q.tableAlias())), nil
 }
 
 // pgrParseOrder reads `col.desc.nullslast,other`.
