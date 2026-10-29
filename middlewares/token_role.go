@@ -30,6 +30,7 @@ import (
 	"github.com/urfave/negroni/v3"
 
 	pctx "github.com/prest/prest/v2/context"
+	"github.com/prest/prest/v2/internal/pgrwire"
 )
 
 var (
@@ -99,12 +100,21 @@ func (c tokenRoleCheck) serve(w http.ResponseWriter, r *http.Request, next http.
 		next(w, r)
 		return
 	}
-	if len(values) != 1 {
-		c.refuse(w, "more than one Authorization header")
+	onSDK := strings.HasPrefix(r.URL.Path, PostgRESTPrefix)
+	if len(values) != 1 && !onSDK {
+		c.refuse(w, r, &pgrwire.TokenError{Message: "more than one Authorization header"})
 		return
 	}
-	role, claims, why := c.verify(values[0])
-	if why != "" {
+	if onSDK && !bearer(values[0]) {
+		// PostgREST reads a token only from a Bearer header (Auth.hs,
+		// extractBearerAuth); any other Authorization is no token at all, and
+		// the call is the anonymous role's. With several headers it reads the
+		// first.
+		next(w, r)
+		return
+	}
+	role, claims, fault := c.verify(values[0])
+	if fault != nil {
 		// miniship (#1302): a User's token on the SDK's address is not the
 		// install's to verify. It is signed by the key set of the Project the
 		// call is for, which the handler resolves, so it is carried on to the
@@ -114,11 +124,18 @@ func (c tokenRoleCheck) serve(w http.ResponseWriter, r *http.Request, next http.
 			next(w, r.WithContext(pctx.WithUserToken(r.Context(), token)))
 			return
 		}
-		c.refuse(w, why)
+		c.refuse(w, r, fault)
 		return
 	}
 	ctx := pctx.WithTokenRole(r.Context(), role)
 	next(w, r.WithContext(pctx.WithTokenClaims(ctx, claims)))
+}
+
+// bearer is whether an Authorization value is "Bearer <token>", the scheme
+// matched without regard to case as Wai's extractBearerAuth does.
+func bearer(authorization string) bool {
+	scheme, _, found := strings.Cut(authorization, " ")
+	return found && strings.EqualFold(scheme, "Bearer")
 }
 
 // PostgRESTPrefix is the SDK's database address, the one address a User's own
@@ -149,45 +166,53 @@ func userToken(r *http.Request, authorization string) (string, bool) {
 	return token, true
 }
 
-// verify answers the role the token names and its claims as signed, or why it
-// is refused.
-func (c tokenRoleCheck) verify(authorization string) (role string, claims []byte, why string) {
+// verify answers the role the token names and its claims as signed, or the
+// fault PostgREST 14 answers it with (internal/pgrwire).
+func (c tokenRoleCheck) verify(authorization string) (role string, claims []byte, fault *pgrwire.TokenError) {
 	scheme, token, found := strings.Cut(authorization, " ")
-	if !found || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
-		return "", nil, "Authorization is not a Bearer token"
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", nil, &pgrwire.TokenError{Code: "PGRST301", Message: "Authorization is not a Bearer token"}
 	}
-	parsed, err := jwt.ParseSigned(strings.TrimSpace(token), []jose.SignatureAlgorithm{c.alg})
-	if err != nil || len(parsed.Headers) != 1 {
-		return "", nil, "the token is not a JWT signed with " + string(c.alg)
+	named, err := pgrwire.Decode(strings.TrimSpace(token), c.alg, func(kid string) (jose.JSONWebKey, bool, error) {
+		keys := c.keys.Key(kid)
+		if len(keys) != 1 {
+			return jose.JSONWebKey{}, false, nil
+		}
+		return keys[0], true, nil
+	}, c.now())
+	if err != nil {
+		var refused *pgrwire.TokenError
+		if errors.As(err, &refused) {
+			return "", nil, refused
+		}
+		return "", nil, &pgrwire.TokenError{Code: "PGRST301", Message: "JWT couldn't be decoded"}
 	}
-	keys := c.keys.Key(parsed.Headers[0].KeyID)
-	if len(keys) != 1 {
-		return "", nil, ErrJWKSetKeyNotFound.Error()
-	}
-	var registered jwt.Claims
-	var named map[string]any
-	if err := parsed.Claims(keys[0].Public(), &registered, &named); err != nil {
-		return "", nil, "the token's signature does not verify"
-	}
-	if registered.Expiry == nil {
-		return "", nil, "the token has no expiry"
-	}
-	if err := registered.ValidateWithLeeway(jwt.Expected{Time: c.now()}, jwt.DefaultLeeway); err != nil {
-		return "", nil, "the token is expired or not valid yet"
+	// The two claims rest requires and PostgREST does not: a token with no
+	// expiry never stops, and one with no role is not one the install signed
+	// for a purpose.
+	if _, ok := named["exp"]; !ok {
+		return "", nil, pgrwire.BadClaims("the token has no exp claim")
 	}
 	role, _ = named[c.claim].(string)
 	if role == "" {
-		return "", nil, "the token names no role"
+		return "", nil, pgrwire.BadClaims("the token names no role")
 	}
 	claims, err = json.Marshal(named)
 	if err != nil {
-		return "", nil, "the token's claims could not be read"
+		return "", nil, pgrwire.BadClaims("the token's claims could not be read")
 	}
-	return role, claims, ""
+	return role, claims, nil
 }
 
-func (c tokenRoleCheck) refuse(w http.ResponseWriter, why string) {
-	slog.Warn("rest refused a token", "why", why)
+// refuse answers a token that failed. On the SDK's address it is PostgREST's
+// error, envelope and headers; on every other address it is the {"error": ...}
+// body and the Bearer challenge it has always been.
+func (c tokenRoleCheck) refuse(w http.ResponseWriter, r *http.Request, fault *pgrwire.TokenError) {
+	slog.Warn("rest refused a token", "why", fault.Message, "details", fault.Details)
+	if strings.HasPrefix(r.URL.Path, PostgRESTPrefix) {
+		pgrwire.Write(w, fault.Envelope())
+		return
+	}
 	w.Header().Set("WWW-Authenticate", tokenRoleChallenge)
-	http.Error(w, fmt.Sprintf(jsonErrFormat, why), http.StatusUnauthorized)
+	http.Error(w, fmt.Sprintf(jsonErrFormat, fault.Message), http.StatusUnauthorized)
 }

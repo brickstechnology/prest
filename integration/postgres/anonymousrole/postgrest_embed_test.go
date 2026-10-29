@@ -326,8 +326,10 @@ func TestPostgRESTEmbed_aRelatedRowTheRoleMayNotReadIsAbsent(t *testing.T) {
 
 	// A table the role holds no grant on refuses the whole read, in the
 	// Database's words, as a read of it would.
+	// The anonymous role's refusal is 401, as PostgREST 14 answers 42501 for a
+	// caller it does not know (Error.hs, pgErrorStatus).
 	status, refusal := rest.refused(t, rest.anon, books+"?select=id,"+secrets+"(body)")
-	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, http.StatusUnauthorized, status)
 	require.Equal(t, "42501", refusal["code"])
 	_, _, body = rest.read(t, rest.admin, books+"?select=id,"+secrets+"(body)&id=eq.1")
 	require.JSONEq(t, `[{"id": 1, "`+secrets+`": [{"body": "not for the reader"}]}]`, body)

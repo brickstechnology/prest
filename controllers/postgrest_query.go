@@ -44,6 +44,8 @@ type pgrError struct {
 	hint    string
 	// detailsList is details when PostgREST answers a list, as PGRST201 does.
 	detailsList any
+	// challenge is the WWW-Authenticate value of a 401; empty is "Bearer".
+	challenge string
 }
 
 func (e *pgrError) Error() string { return e.message }
@@ -52,6 +54,24 @@ func (e *pgrError) Error() string { return e.message }
 // query string it cannot parse.
 func pgrRefuse(message string) error {
 	return &pgrError{status: 400, code: "PGRST100", message: message}
+}
+
+// pgrBadSchema is PGRST106: a schema the address does not serve. PostgREST 14
+// names the schema and, in the hint, the ones it exposes (Error.hs,
+// UnacceptableSchema).
+func pgrBadSchema(profile string) error {
+	return &pgrError{
+		status:  406,
+		code:    "PGRST106",
+		message: "Invalid schema: " + profile,
+		hint:    "Only the following schemas are exposed: " + pgrSchema,
+	}
+}
+
+// pgrBadContentType is a body in a Content-Type rest does not read. PostgREST
+// 14 answers it as an invalid body, 400 PGRST102 (ApiRequest/Payload.hs).
+func pgrBadContentType(media string) error {
+	return &pgrError{status: 400, code: "PGRST102", message: "Content-Type not acceptable: " + media}
 }
 
 func pgrQuote(name string) string { return pq.QuoteIdentifier(name) }

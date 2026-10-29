@@ -405,7 +405,7 @@ func TestPostgREST_theBoundsAreRefusedInTheSDKsShape(t *testing.T) {
 	require.Equal(t, "22P02", refusal(body)["code"])
 	status, _, body = ask(t, rest, http.MethodGet, "/rest/v1/rest_pgr_absent", anon, nil)
 	require.Equal(t, http.StatusNotFound, status)
-	require.Equal(t, "42P01", refusal(body)["code"])
+	require.Equal(t, "PGRST205", refusal(body)["code"])
 
 	// A verb the SDK never sends. Expected: 404, as for any route rest lacks.
 	status, _, _ = ask(t, rest, http.MethodPut, "/rest/v1/"+articles+"?id=eq.1", anon, nil)

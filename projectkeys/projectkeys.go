@@ -23,12 +23,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"sync"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/prest/prest/v2/internal/pgrwire"
 )
 
 // Role is the one role a User's token may name. The pool signs nothing else,
@@ -98,37 +98,56 @@ func New(address func(project string) string, timeout, window time.Duration, max
 // Verify checks token against project's key set and answers the role it names
 // and its claims as they were signed.
 func (s *Source) Verify(ctx context.Context, project, token string) (string, []byte, error) {
-	parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{Algorithm})
-	if err != nil || len(parsed.Headers) != 1 {
-		return "", nil, fmt.Errorf("%w: it is not a JWT signed with %s", ErrRefused, Algorithm)
-	}
-	kid := parsed.Headers[0].KeyID
-	key, err := s.findKey(ctx, project, kid)
+	named, err := pgrwire.Decode(token, Algorithm, func(kid string) (jose.JSONWebKey, bool, error) {
+		key, err := s.findKey(ctx, project, kid)
+		switch {
+		case errors.Is(err, ErrRefused):
+			return jose.JSONWebKey{}, false, nil
+		case err != nil:
+			return jose.JSONWebKey{}, false, err
+		}
+		return key, true, nil
+	}, s.now())
 	if err != nil {
+		var fault *pgrwire.TokenError
+		if errors.As(err, &fault) {
+			// PostgREST 14's fault, behind ErrRefused: the handler answers
+			// with the fault, and errors.Is still says it was refused.
+			return "", nil, fmt.Errorf("%w: %w", ErrRefused, fault)
+		}
 		return "", nil, err
 	}
-	var registered jwt.Claims
-	var named map[string]any
-	if err := parsed.Claims(key.Public(), &registered, &named); err != nil {
-		return "", nil, fmt.Errorf("%w: its signature does not verify", ErrRefused)
+	if _, ok := named["exp"]; !ok {
+		return "", nil, refused(pgrwire.BadClaims("the token has no exp claim"))
 	}
-	if registered.Expiry == nil {
-		return "", nil, fmt.Errorf("%w: it has no expiry", ErrRefused)
-	}
-	if err := registered.ValidateWithLeeway(jwt.Expected{Time: s.now()}, jwt.DefaultLeeway); err != nil {
-		return "", nil, fmt.Errorf("%w: it is expired or not valid yet", ErrRefused)
-	}
-	if !slices.Contains(registered.Audience, Audience) {
-		return "", nil, fmt.Errorf("%w: its audience is not %s", ErrRefused, Audience)
+	if !audienceHolds(named["aud"], Audience) {
+		return "", nil, refused(pgrwire.NotInAudience())
 	}
 	if role, _ := named["role"].(string); role != Role {
-		return "", nil, fmt.Errorf("%w: it names a role that is not %s", ErrRefused, Role)
+		return "", nil, refused(pgrwire.BadClaims("the token names a role that is not " + Role))
 	}
 	claims, err := json.Marshal(named)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: its claims could not be read", ErrRefused)
+		return "", nil, refused(pgrwire.BadClaims("the token's claims could not be read"))
 	}
 	return Role, claims, nil
+}
+
+func refused(fault *pgrwire.TokenError) error { return fmt.Errorf("%w: %w", ErrRefused, fault) }
+
+// audienceHolds is whether aud, a string or a list of strings, names want.
+func audienceHolds(aud any, want string) bool {
+	switch typed := aud.(type) {
+	case string:
+		return typed == want
+	case []any:
+		for _, entry := range typed {
+			if entry == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // findKey is the key kid names in project's set, reading the set when it is

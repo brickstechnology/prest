@@ -2,9 +2,11 @@ package router
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/prest/prest/v2/config"
 	"github.com/prest/prest/v2/controllers"
+	"github.com/prest/prest/v2/internal/pgrwire"
 	"github.com/prest/prest/v2/middlewares"
 	"github.com/prest/prest/v2/plugins"
 
@@ -48,7 +50,8 @@ func RegisterRoutes(
 	// A write verb on the table path matches the path but not the method, and
 	// gorilla/mux answers that 405 with an Allow header: it tells a caller the
 	// path is served. rest answers it 404, as it answers every route it lacks.
-	router.MethodNotAllowedHandler = http.NotFoundHandler()
+	router.MethodNotAllowedHandler = http.HandlerFunc(notFound)
+	router.NotFoundHandler = http.HandlerFunc(notFound)
 
 	router.HandleFunc("/_health", h.Health.Handler()).Methods("GET")
 	// miniship-cloud#1302: the Supabase SDK's database address, reads only,
@@ -65,6 +68,22 @@ func RegisterRoutes(
 	// PGRST101 as PostgREST answers them, rather than by the router's 404.
 	router.Handle("/rest/v1/rpc/{function}", crudRoute(crudStack, h.CRUD.PostgRESTCall)).Methods("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 	router.Handle("/{database}/{schema}/{table}", crudRoute(crudStack, h.CRUD.Select)).Methods("GET")
+}
+
+// notFound answers a route rest lacks 404. On the SDK's address the 404 is
+// PostgREST 14's PGRST125, "Invalid path specified in request URL"
+// (miniship-cloud#1888, Error.hs, InvalidResourcePath), so the SDK reads an
+// error it can show; elsewhere it is the plain 404 it has always been.
+func notFound(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, middlewares.PostgRESTPrefix) || r.URL.Path == strings.TrimSuffix(middlewares.PostgRESTPrefix, "/") {
+		pgrwire.Write(w, pgrwire.Error{
+			Status:  http.StatusNotFound,
+			Code:    "PGRST125",
+			Message: "Invalid path specified in request URL",
+		})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // otelRouteTagMiddleware annotates the active OpenTelemetry span with the

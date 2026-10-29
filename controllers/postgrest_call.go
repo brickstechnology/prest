@@ -321,19 +321,11 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		profileHeader = "Content-Profile"
 	}
 	if profile := r.Header.Get(profileHeader); profile != "" && profile != pgrSchema {
-		pgrWriteError(w, &pgrError{
-			status:  http.StatusNotAcceptable,
-			code:    "PGRST106",
-			message: "The schema must be one of the following: " + pgrSchema,
-		})
+		pgrWriteError(w, pgrBadSchema(profile))
 		return
 	}
 	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); isPost && media != "" && media != "application/json" {
-		pgrWriteError(w, &pgrError{
-			status:  http.StatusUnsupportedMediaType,
-			code:    "PGRST107",
-			message: "None of these Content-Types are available: " + media,
-		})
+		pgrWriteError(w, pgrBadContentType(media))
 		return
 	}
 
@@ -404,10 +396,12 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
-	media, err := pgrNegotiate(r.Header.Get("Accept"))
-	if err != nil {
-		pgrWriteError(w, err)
-		return
+	// PostgREST finds the function first, then negotiates the media type, then
+	// checks the preferences (Plan.hs, callReadPlan): known now, raised in the
+	// transaction once the function is found.
+	media, early := pgrNegotiate(r.Header.Get("Accept"))
+	if early == nil {
+		early = prefer.strictFault()
 	}
 	wantsObject := media.object()
 	var routine *pgrRoutine
@@ -442,6 +436,13 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 			return pgrAmbiguousRoutine(candidates)
 		}
 		routine = chosen
+		if early != nil {
+			return early
+		}
+		if prefer.strict() && prefer.maxAffectedSet && chosen.single() {
+			return &pgrError{status: http.StatusBadRequest, code: "PGRST128",
+				message: "Function must return SETOF or TABLE when max-affected preference is used with handling=strict"}
+		}
 
 		arguments := ""
 		if isPost {
@@ -457,7 +458,7 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		if plan.one == nil && len(plan.specified) == 0 {
 			plan.arguments = ""
 		}
-		statement, args, err := plan.statementAs(prefer.counted, media)
+		statement, args, err := plan.statementAs(prefer.counted(), media)
 		if err != nil {
 			return err
 		}
@@ -497,17 +498,15 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		if chosen.single() {
 			returned = 1
 		}
-		if prefer.strict && prefer.maxAffected >= 0 && returned > int64(prefer.maxAffected) {
-			return &pgrError{status: http.StatusBadRequest, code: "PGRST124",
-				message: "Query result exceeds max-affected preference constraint",
-				details: fmt.Sprintf("The query affects %d rows", returned)}
-		}
 		if wantsObject && !chosen.single() && len(result.rows) != 1 {
 			return &pgrError{status: http.StatusNotAcceptable, code: "PGRST116",
-				message: "JSON object requested, multiple (or no) rows returned",
+				message: "Cannot coerce the result to a single JSON object",
 				details: fmt.Sprintf("The result contains %d rows", len(result.rows))}
 		}
-		if isPost && prefer.rollback {
+		if prefer.exceeds(returned) {
+			return pgrMaxAffectedFault(returned)
+		}
+		if isPost && prefer.rollback() {
 			return adapters.ErrRollback
 		}
 		return nil
@@ -551,7 +550,8 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	if routine.single() {
 		returned = 1
 	}
-	w.Header().Set("Content-Range", pgrContentRange(read.offset, returned, result.total, prefer.counted))
+	w.Header().Set("Content-Range", pgrContentRange(read.offset, returned, result.total, prefer.counted()))
+	prefer.setApplied(w, pgrApplied{maxAffected: true})
 	if routine.result == pgrResultVoid {
 		w.WriteHeader(http.StatusNoContent)
 		return
