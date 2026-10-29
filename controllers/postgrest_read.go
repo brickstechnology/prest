@@ -78,11 +78,7 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if profile := r.Header.Get("Accept-Profile"); profile != "" && profile != pgrSchema {
-		pgrWriteError(w, &pgrError{
-			status:  http.StatusNotAcceptable,
-			code:    "PGRST106",
-			message: "The schema must be one of the following: " + pgrSchema,
-		})
+		pgrWriteError(w, pgrBadSchema(profile))
 		return
 	}
 	read, err := pgrParseRead(r.URL.Query(), h.bounds.MaxPageSize)

@@ -603,13 +603,21 @@ you mean the files, and the directory only when the patch owns all of it.
     answers `Location: /table?pk=eq.value` (the key in the table's column
     order, `renderSimpleQuery` encoding). `PGRST116` has PostgREST 14's
     message, and 42501 is 401 for the anonymous role on a read too.
-    `timezone=` is neither applied nor echoed.
+    `timezone=` is neither applied nor echoed. The messages the earlier tickets
+    wrote from PostgREST 12 are PostgREST 14's: `PGRST106` is `Invalid schema:
+    x` with the exposed schemas in the hint, a body in a Content-Type rest does
+    not read is `400 PGRST102 Content-Type not acceptable: x`, and a route rest
+    lacks under `/rest/v1/` is `404 PGRST125`. The hints of `PGRST200` and
+    `PGRST202` use the same fuzzy match, at the scores `Error.hs` gives each.
     Paths: `internal/pgrwire/`, `controllers/postgrest_prefer.go`,
     `controllers/postgrest_prefer_test.go`, `controllers/postgrest_tables.go`,
     `controllers/postgrest_token_fault_test.go`,
-    `controllers/postgrest_call.go`, `controllers/postgrest_mutation.go`,
+    `controllers/postgrest_call.go`, `controllers/postgrest_embed.go`,
+    `controllers/postgrest_mutation.go`,
     `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `controllers/postgrest_routine.go`,
     `controllers/postgrest_write.go`, `middlewares/token_role.go`,
+    `router/router.go`, `router/postgrest_notfound_test.go`,
     `middlewares/token_role_postgrest_test.go`, `middlewares/utils.go`,
     `projectkeys/projectkeys.go`,
     `integration/postgres/anonymousrole/postgrest_errors_test.go`,

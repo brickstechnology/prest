@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/prest/prest/v2/internal/pgrwire"
 )
 
 // pgrParam is one input argument of a function.
@@ -366,7 +368,7 @@ func pgrNoRoutine(name string, keys []string, singleObject, isPost bool, overloa
 		return failure
 	}
 	if len(overloads) == 0 {
-		if near, ok := pgrClosest(name, others); ok {
+		if near, ok := pgrClosest(name, others, pgrwire.TableMinScore); ok {
 			failure.hint = "Perhaps you meant to call the function " + pgrSchema + "." + near
 		}
 		return failure
@@ -381,7 +383,7 @@ func pgrNoRoutine(name string, keys []string, singleObject, isPost bool, overloa
 		shape := "(" + strings.Join(names, ", ") + ")"
 		shapes = append(shapes, shape)
 	}
-	if near, ok := pgrClosest("("+listed+")", shapes); ok {
+	if near, ok := pgrClosest("("+listed+")", shapes, pgrwire.RelationshipMinScore); ok {
 		failure.hint = "Perhaps you meant to call the function " + pgrSchema + "." + name + near
 	}
 	return failure

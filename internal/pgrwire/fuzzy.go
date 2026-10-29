@@ -22,16 +22,21 @@ func SuggestTable(names []string, name string) string {
 	if len(names) == 0 || len(names) >= MaxFuzzyTables {
 		return ""
 	}
-	return fuzzyOne(names, name, TableMinScore)
+	return Suggest(names, name, TableMinScore)
 }
 
 type gramCounts map[string]int
 
-// fuzzyOne is Data.FuzzySet.getOneWithMinScore of fuzzyset 0.2.4, the version
+// RelationshipMinScore is the score Fuzzy.getOne gives a relationship, a
+// parameter list, or a function's parameters (Error.hs): fuzzyset's default.
+const RelationshipMinScore = 0.33
+
+// Suggest is Data.FuzzySet.getOneWithMinScore of fuzzyset 0.2.4, the version
 // PostgREST 14 builds with (stack.yaml): gram sizes 3 then 2, cosine
 // similarity over the grams, the best 50 re-scored by normalised Levenshtein
 // distance, and the first size that has a match at or above minScore wins.
-func fuzzyOne(names []string, value string, minScore float64) string {
+// An exact match, in any case, is the answer. "" is no match.
+func Suggest(names []string, value string, minScore float64) string {
 	exact := map[string]string{}
 	for _, name := range names {
 		key := strings.ToLower(name)

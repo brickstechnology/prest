@@ -321,19 +321,11 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		profileHeader = "Content-Profile"
 	}
 	if profile := r.Header.Get(profileHeader); profile != "" && profile != pgrSchema {
-		pgrWriteError(w, &pgrError{
-			status:  http.StatusNotAcceptable,
-			code:    "PGRST106",
-			message: "The schema must be one of the following: " + pgrSchema,
-		})
+		pgrWriteError(w, pgrBadSchema(profile))
 		return
 	}
 	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); isPost && media != "" && media != "application/json" {
-		pgrWriteError(w, &pgrError{
-			status:  http.StatusUnsupportedMediaType,
-			code:    "PGRST107",
-			message: "None of these Content-Types are available: " + media,
-		})
+		pgrWriteError(w, pgrBadContentType(media))
 		return
 	}
 

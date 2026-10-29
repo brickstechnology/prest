@@ -462,11 +462,16 @@ func TestPostgRESTWrite_thePreferencesHoldTheWriteToWhatTheCallerAsked(t *testin
 	status, _, body = send(t, f.rest, http.MethodPost, path, f.a, map[string]string{"Content-Profile": "private"}, `{"title":"x"}`)
 	require.Equal(t, http.StatusNotAcceptable, status, body)
 	require.Equal(t, "PGRST106", refusalOf(t, body)["code"])
+	require.Equal(t, "Invalid schema: private", refusalOf(t, body)["message"])
+	require.Equal(t, "Only the following schemas are exposed: public", refusalOf(t, body)["hint"])
 
-	// A body that is not JSON. Expected: 415, PGRST107.
-	status, _, body = send(t, f.rest, http.MethodPost, path, f.a, map[string]string{"Content-Type": "text/csv"}, "title\nx")
-	require.Equal(t, http.StatusUnsupportedMediaType, status, body)
-	require.Equal(t, "PGRST107", refusalOf(t, body)["code"])
+	// A body rest does not read. Expected: 400, PGRST102, as PostgREST 14
+	// answers a Content-Type it has no payload parser for.
+	status, _, body = send(t, f.rest, http.MethodPost, path, f.a, map[string]string{"Content-Type": "application/xml"}, "<a/>")
+	require.Equal(t, http.StatusBadRequest, status, body)
+	got := refusalOf(t, body)
+	require.Equal(t, "PGRST102", got["code"])
+	require.Equal(t, "Content-Type not acceptable: application/xml", got["message"])
 }
 
 func TestPostgRESTWrite_aWriteIsOneTransactionOnItsOwnRole(t *testing.T) {

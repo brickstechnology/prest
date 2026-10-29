@@ -34,6 +34,8 @@ import (
 	"strings"
 
 	"github.com/lib/pq"
+
+	"github.com/prest/prest/v2/internal/pgrwire"
 )
 
 // pgrMaxEmbedDepth is how many tables a read may embed inside one another.
@@ -398,7 +400,7 @@ func (all pgrRelations) noRelationship(origin, target, hint string) error {
 		for _, r := range all[origin] {
 			children = append(children, r.foreign)
 		}
-		if best, ok := pgrClosest(target, children); ok {
+		if best, ok := pgrClosest(target, children, pgrwire.RelationshipMinScore); ok {
 			suggestion = fmt.Sprintf("Perhaps you meant '%s' instead of '%s'.", best, target)
 		}
 	} else {
@@ -406,7 +408,7 @@ func (all pgrRelations) noRelationship(origin, target, hint string) error {
 		for table := range all {
 			parents = append(parents, table)
 		}
-		if best, ok := pgrClosest(origin, parents); ok {
+		if best, ok := pgrClosest(origin, parents, pgrwire.RelationshipMinScore); ok {
 			suggestion = fmt.Sprintf("Perhaps you meant '%s' instead of '%s'.", best, origin)
 		}
 	}
@@ -455,45 +457,15 @@ func pgrAmbiguous(origin, target string, found []*pgrRelation) error {
 	}
 }
 
-// pgrClosest is the name nearest to want, if one is near enough to be a typo
-// of it. PostgREST suggests by fuzzy match; a name within a third of its
-// length in edits is the same notion, and an exact match suggests nothing.
-func pgrClosest(want string, names []string) (string, bool) {
-	best, bestDistance := "", -1
-	for _, name := range names {
-		distance := pgrEditDistance(want, name)
-		if distance == 0 {
-			return "", false
-		}
-		if bestDistance < 0 || distance < bestDistance {
-			best, bestDistance = name, distance
-		}
-	}
-	longest := max(len(want), len(best))
-	if bestDistance < 0 || bestDistance*3 > longest {
+// pgrClosest is the name Fuzzy.getOne of PostgREST 14 picks for want from
+// names, at minScore (Error.hs; internal/pgrwire). A name that is want in
+// another case is want itself and suggests nothing.
+func pgrClosest(want string, names []string, minScore float64) (string, bool) {
+	best := pgrwire.Suggest(names, want, minScore)
+	if best == "" || strings.EqualFold(best, want) && best == want {
 		return "", false
 	}
 	return best, true
-}
-
-func pgrEditDistance(a, b string) int {
-	previous := make([]int, len(b)+1)
-	for j := range previous {
-		previous[j] = j
-	}
-	for i := 1; i <= len(a); i++ {
-		current := make([]int, len(b)+1)
-		current[0] = i
-		for j := 1; j <= len(b); j++ {
-			cost := 1
-			if a[i-1] == b[j-1] {
-				cost = 0
-			}
-			current[j] = min(previous[j]+1, current[j-1]+1, previous[j-1]+cost)
-		}
-		previous = current
-	}
-	return previous[len(b)]
 }
 
 // ---------------------------------------------------------------------------
