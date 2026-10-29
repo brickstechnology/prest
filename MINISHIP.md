@@ -571,6 +571,54 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_media_test.go`,
     `MINISHIP.md`
 
+28. **The errors and preferences of PostgREST 14** — miniship-cloud#1888, spec
+    #1869, ADR 0075: every refusal of `/rest/v1` has PostgREST v14.18's
+    envelope (`code`, `message`, `details`, `hint`, all four always) and its
+    headers (`Error.hs`): `Content-Type: application/json; charset=utf-8`
+    (`toContentType`; the middleware no longer rewrites it to plain
+    `application/json`), `Proxy-Status: PostgREST; error=<code>`, and
+    `WWW-Authenticate` on a 401. A table the Database does not have is `404
+    PGRST205` ("Could not find the table 'public.x' in the schema cache") with
+    `Perhaps you meant the table 'public.y'` from a port of fuzzyset 0.2.4's
+    `getOneWithMinScore` at 0.75 over the schema's tables, views, materialised
+    and foreign tables (none at 500 tables or more), found before the media
+    type and the preferences are looked at, and a function before them as well
+    (`Plan.hs`). A token is read as `Auth/Jwt.hs` reads it: `PGRST301` (empty,
+    not three parts, undecodable, wrong algorithm, no suitable key, signature)
+    and `PGRST303` (expired, not yet valid, issued in the future, claims of the
+    wrong type), 401 with `Bearer error="invalid_token", error_description=…`.
+    The token check does this on `/rest/v1/` only (every other address keeps
+    its `{"error": …}` body), reads a token from a Bearer header only (any
+    other Authorization is the anonymous role's call, as Wai's
+    `extractBearerAuth` leaves it), and keeps two requirements PostgREST does
+    not have, `exp` and a role, as `PGRST303 Parsing claims failed` with the
+    reason in `details`. `Prefer` is read as `Preferences.hs` reads it (the
+    first value of each preference wins; the unrecognised are invalid): under
+    `handling=strict` they are `400 PGRST122`, leniently ignored;
+    `max-affected` binds under strict only and not on an insert (`PGRST124`),
+    and a function that returns one value refuses it (`PGRST128`);
+    `Preference-Applied` echoes resolution, missing, return, count, tx,
+    handling and max-affected in that order, each handler the ones
+    `Response.hs` echoes for it. `return=headers-only` on an insert of one row
+    answers `Location: /table?pk=eq.value` (the key in the table's column
+    order, `renderSimpleQuery` encoding). `PGRST116` has PostgREST 14's
+    message, and 42501 is 401 for the anonymous role on a read too.
+    `timezone=` is neither applied nor echoed.
+    Paths: `internal/pgrwire/`, `controllers/postgrest_prefer.go`,
+    `controllers/postgrest_prefer_test.go`, `controllers/postgrest_tables.go`,
+    `controllers/postgrest_token_fault_test.go`,
+    `controllers/postgrest_call.go`, `controllers/postgrest_mutation.go`,
+    `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
+    `controllers/postgrest_write.go`, `middlewares/token_role.go`,
+    `middlewares/token_role_postgrest_test.go`, `middlewares/utils.go`,
+    `projectkeys/projectkeys.go`,
+    `integration/postgres/anonymousrole/postgrest_errors_test.go`,
+    `integration/postgres/anonymousrole/postgrest_embed_test.go`,
+    `integration/postgres/anonymousrole/postgrest_media_test.go`,
+    `integration/postgres/anonymousrole/postgrest_read_test.go`,
+    `integration/postgres/anonymousrole/postgrest_write_test.go`,
+    `MINISHIP.md`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

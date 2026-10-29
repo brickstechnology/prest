@@ -226,6 +226,10 @@ func TestPostgRESTMedia_stripNullsOfAWrite(t *testing.T) {
 func TestPostgRESTMedia_whatRestCannotProduceIs406PGRST107(t *testing.T) {
 	f := newNotesFixture(t)
 	stageCountries(t, f.db)
+	// PostgREST finds the function before it negotiates the media type
+	// (Plan.hs, callReadPlan), so the call below has a function to find.
+	exec(t, f.db, `CREATE OR REPLACE FUNCTION public.rest_pgm_hello() RETURNS text LANGUAGE sql AS $$ SELECT 'hello' $$`)
+	t.Cleanup(func() { exec(t, f.db, `DROP FUNCTION IF EXISTS public.rest_pgm_hello()`) })
 	path := "/rest/v1/" + notes
 
 	for accept, listed := range map[string]string{
@@ -255,7 +259,7 @@ func TestPostgRESTMedia_whatRestCannotProduceIs406PGRST107(t *testing.T) {
 		require.Equal(t, before, theNotes(t, f.db), accept)
 
 		// And a call.
-		status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgc_hello", f.anon, accepting(accept), "")
+		status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgm_hello", f.anon, accepting(accept), "")
 		require.Equal(t, http.StatusNotAcceptable, status, "%s: %s", accept, body)
 		require.Equal(t, "PGRST107", refusalOf(t, body)["code"], accept)
 	}

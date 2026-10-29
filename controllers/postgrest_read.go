@@ -102,6 +102,10 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roles, _ := h.rolesOf(adapter)
+	anon, _ := anonymousRole(roles, project)
+	authed := caller.Role != anon && caller.Role != "anon"
+
 	// PostgREST finds the table, plans the read, and only then negotiates the
 	// media type and checks the preferences, so a refusal of either waits for
 	// the table (PGRST205) and the plan (Plan.hs, wrappedReadPlan). It is
@@ -182,7 +186,7 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Errorln(logsafe.Error(err))
-		failure := pgrReadFailure(err)
+		failure := pgrReadFailure(err, authed)
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) {
 			switch {
@@ -195,7 +199,7 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 			case media.kind == pgrMediaGeoJSON:
 				// PostgREST runs the query and passes the Database's refusal on
 				// as it is: without PostGIS, 42883 and a 404.
-				failure = pgrWriteFailure(err, true)
+				failure = pgrWriteFailure(err, authed)
 			}
 		}
 		pgrWriteError(w, failure)
@@ -345,7 +349,7 @@ func pgrContentRange(offset, rows int, total int64, counted bool) string {
 // filter. Nothing of the driver's own words is passed on but the one message
 // readFailure already passes, the Database's account of a privilege the role
 // lacks.
-func pgrReadFailure(err error) error {
+func pgrReadFailure(err error, authed bool) error {
 	var refused *pgrError
 	if errors.As(err, &refused) {
 		return refused
@@ -356,6 +360,12 @@ func pgrReadFailure(err error) error {
 	if errors.As(err, &pqErr) {
 		failure.code = string(pqErr.Code)
 		switch string(pqErr.Code) {
+		case insufficientPrivilege:
+			// 42501 is 403 for a caller PostgREST knows, and 401 for the
+			// anonymous role (Error.hs, pgErrorStatus).
+			if !authed {
+				failure.status = http.StatusUnauthorized
+			}
 		case undefinedTable:
 			failure.status = http.StatusNotFound
 		case queryCanceled:
