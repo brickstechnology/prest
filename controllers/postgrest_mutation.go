@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"github.com/lib/pq"
@@ -220,6 +221,11 @@ type pgrMutation struct {
 	defaults bool
 	// representation is whether the changed rows come back.
 	representation bool
+	// headersOnly is Prefer: return=headers-only. An insert then answers a
+	// Location naming the row's primary key (miniship-cloud#1888), and locate
+	// are those columns, in the table's column order.
+	headersOnly bool
+	locate      []string
 	// selected are the columns returned; order is the ORDER BY of the rows
 	// returned, built by pgrParseOrder.
 	selected []string
@@ -303,6 +309,11 @@ func (m *pgrMutation) returning() string {
 		}
 	} else {
 		parts = append(parts, `1 AS "pgrst_n"`)
+		if m.headersOnly && m.kind == pgrInsert {
+			for i, name := range m.locate {
+				parts = append(parts, fmt.Sprintf(`"t".%s AS "pgrst_loc_%d"`, pgrQuote(name), i))
+			}
+		}
 	}
 	if m.tracksInserted {
 		parts = append(parts, `("t".xmax = 0) AS "pgrst_inserted"`)
@@ -374,6 +385,9 @@ type pgrMutationResult struct {
 	total    int64
 	inserted int64
 	rows     []json.RawMessage
+	// key are the primary key values, as text and in the order of the
+	// mutation's locate, of the one row a return=headers-only insert wrote.
+	key []*string
 	// text is the body of a representation that is not a JSON array: CSV or
 	// GeoJSON.
 	text string
@@ -404,10 +418,26 @@ func (m *pgrMutation) run(ctx context.Context, tx *sql.Tx, args []any) (pgrMutat
 		rows = fmt.Sprintf(`CASE WHEN (SELECT count(*) FROM "pgrst_w") > %d THEN '[]' ELSE (%s) END`,
 			m.quota, m.media.aggregate(page, "x", false))
 	}
-	query := fmt.Sprintf(`WITH "pgrst_w" AS (%s) SELECT (SELECT count(*) FROM "pgrst_w"), %s, %s`, m.statement(), inserted, rows)
+	location := "NULL::text"
+	if m.headersOnly && m.kind == pgrInsert && len(m.locate) > 0 {
+		// Exactly one row written, or no Location (MainTx.hs, locF).
+		keys := make([]string, 0, len(m.locate))
+		for i := range m.locate {
+			keys = append(keys, fmt.Sprintf(`"t"."pgrst_loc_%d"::text`, i))
+		}
+		location = fmt.Sprintf(`(SELECT json_build_array(%s)::text FROM "pgrst_w" AS "t" WHERE (SELECT count(*) FROM "pgrst_w") = 1)`,
+			strings.Join(keys, ", "))
+	}
+	query := fmt.Sprintf(`WITH "pgrst_w" AS (%s) SELECT (SELECT count(*) FROM "pgrst_w"), %s, %s, %s`, m.statement(), inserted, rows, location)
 	var out string
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&result.total, &result.inserted, &out); err != nil {
+	var key sql.NullString
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&result.total, &result.inserted, &out, &key); err != nil {
 		return result, err
+	}
+	if key.Valid {
+		if err := json.Unmarshal([]byte(key.String), &result.key); err != nil {
+			return result, err
+		}
 	}
 	if m.representation {
 		if !m.media.isJSON() {
@@ -419,4 +449,39 @@ func (m *pgrMutation) run(ctx context.Context, tx *sql.Tx, args []any) (pgrMutat
 		}
 	}
 	return result, nil
+}
+
+// pgrInTableOrder is the names of key in the order the table's columns come,
+// which is the order PostgREST's Location lists them in (SqlFragment.hs,
+// locationF reads them from the row).
+func pgrInTableOrder(key []string, columns []pgrTableColumn) []string {
+	var ordered []string
+	for _, column := range columns {
+		for _, name := range key {
+			if name == column.name {
+				ordered = append(ordered, name)
+			}
+		}
+	}
+	return ordered
+}
+
+// location is the Location header of an insert that wrote one row: the table,
+// then each primary key column as column=eq.value, or is.null for a NULL, the
+// way renderSimpleQuery True writes a query (Response.hs). Empty when the row
+// is not one, or the table has no primary key.
+func (r pgrMutationResult) location(table string, locate []string) string {
+	if len(r.key) == 0 || len(r.key) != len(locate) {
+		return ""
+	}
+	escape := func(text string) string { return strings.ReplaceAll(url.QueryEscape(text), "+", "%20") }
+	pairs := make([]string, 0, len(locate))
+	for i, name := range locate {
+		value := "is.null"
+		if r.key[i] != nil {
+			value = "eq." + *r.key[i]
+		}
+		pairs = append(pairs, escape(name)+"="+escape(value))
+	}
+	return "/" + table + "?" + strings.Join(pairs, "&")
 }

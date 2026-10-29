@@ -44,6 +44,8 @@ type pgrError struct {
 	hint    string
 	// detailsList is details when PostgREST answers a list, as PGRST201 does.
 	detailsList any
+	// challenge is the WWW-Authenticate value of a 401; empty is "Bearer".
+	challenge string
 }
 
 func (e *pgrError) Error() string { return e.message }

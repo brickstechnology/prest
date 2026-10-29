@@ -51,54 +51,6 @@ import (
 	"github.com/prest/prest/v2/internal/logsafe"
 )
 
-// pgrPrefer is the preferences of Prefer a write acts on.
-type pgrPrefer struct {
-	representation bool
-	counted        bool
-	resolution     string
-	missingDefault bool
-	rollback       bool
-	strict         bool
-	maxAffected    int
-	// singleObject is `params=single-object`, which a function call reads
-	// (miniship-cloud#1304): the whole body is the function's one argument.
-	singleObject bool
-}
-
-// pgrParsePrefer reads every Prefer header. A preference rest does not know is
-// ignored, as PostgREST ignores one.
-func pgrParsePrefer(values []string) pgrPrefer {
-	prefer := pgrPrefer{maxAffected: -1}
-	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
-			key, setting, _ := strings.Cut(strings.TrimSpace(part), "=")
-			switch key {
-			case "return":
-				prefer.representation = setting == "representation"
-			case "count":
-				prefer.counted = setting == "exact" || setting == "planned" || setting == "estimated"
-			case "resolution":
-				if setting == "merge-duplicates" || setting == "ignore-duplicates" {
-					prefer.resolution = setting
-				}
-			case "missing":
-				prefer.missingDefault = setting == "default"
-			case "tx":
-				prefer.rollback = setting == "rollback"
-			case "handling":
-				prefer.strict = setting == "strict"
-			case "params":
-				prefer.singleObject = setting == "single-object"
-			case "max-affected":
-				if n, err := strconv.Atoi(setting); err == nil && n >= 0 {
-					prefer.maxAffected = n
-				}
-			}
-		}
-	}
-	return prefer
-}
-
 // timeLimitWriteMessage is timeLimitMessage for a write.
 const timeLimitWriteMessage = "the write ran past the time limit and was cancelled; write fewer rows or add a filter"
 
@@ -160,11 +112,12 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	m := &pgrMutation{
 		table:          table,
-		representation: prefer.representation,
+		representation: prefer.representation(),
+		headersOnly:    prefer.headersOnly(),
 		selected:       selected,
 		order:          read.order,
 		quota:          h.bounds.MaxPageSize,
-		defaults:       prefer.missingDefault,
+		defaults:       prefer.missingDefault(),
 	}
 	args := read.args
 	switch r.Method {
@@ -236,12 +189,14 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
-	// PostgREST negotiates the media type for every write, one that returns
-	// nothing included, and before the write runs.
-	media, err := pgrNegotiate(r.Header.Get("Accept"))
-	if err != nil {
-		pgrWriteError(w, err)
-		return
+	// PostgREST finds the table and plans the write, columns included, and only
+	// then checks the preferences and negotiates the media type, for every
+	// write, one that returns nothing included (Plan.hs, mutateReadPlan). Both
+	// are known now, since they need no Database, and raised in the
+	// transaction once the table and its columns are found.
+	media, early := pgrNegotiate(r.Header.Get("Accept"))
+	if fault := prefer.strictFault(); fault != nil {
+		early = fault
 	}
 	m.media = media
 	wantsObject := media.object()
@@ -259,6 +214,9 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 			}
 			// An update that sets no column changes nothing, as PostgREST
 			// answers it: an empty result.
+			if early != nil {
+				return early
+			}
 			if m.kind != pgrUpdate || len(m.written) > 0 {
 				if result, err = m.run(ctx, tx, args); err != nil {
 					return err
@@ -267,17 +225,15 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 			if result.total > int64(m.quota) {
 				return pgrWriteQuota(int(result.total), m.quota, "the write would change")
 			}
-			if prefer.strict && prefer.maxAffected >= 0 && result.total > int64(prefer.maxAffected) {
-				return &pgrError{status: http.StatusBadRequest, code: "PGRST124",
-					message: "Query result exceeds max-affected preference constraint",
-					details: fmt.Sprintf("The query affects %d rows", result.total)}
-			}
-			if wantsObject && prefer.representation && result.total != 1 {
+			if wantsObject && result.total != 1 {
 				return &pgrError{status: http.StatusNotAcceptable, code: "PGRST116",
-					message: "JSON object requested, multiple (or no) rows returned",
+					message: "Cannot coerce the result to a single JSON object",
 					details: fmt.Sprintf("The result contains %d rows", result.total)}
 			}
-			if prefer.rollback {
+			if m.kind != pgrInsert && prefer.exceeds(result.total) {
+				return pgrMaxAffectedFault(result.total)
+			}
+			if prefer.rollback() {
 				return adapters.ErrRollback
 			}
 			return nil
@@ -301,21 +257,38 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Errorln(logsafe.Error(err))
-		pgrWriteError(w, pgrWriteFailure(err, authed))
+		failure := pgrWriteFailure(err, authed)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && string(pqErr.Code) == undefinedTable {
+			// A table the Database does not have is PostgREST's PGRST205.
+			if missing := h.tableNotFound(ctx, adapter, caller, table); missing != nil {
+				failure = missing
+			}
+		}
+		pgrWriteError(w, failure)
 		return
 	}
 
-	w.Header().Set("Content-Range", pgrWriteContentRange(m.kind, result.total, prefer.counted))
+	w.Header().Set("Content-Range", pgrWriteContentRange(m.kind, result.total, prefer.counted()))
 	status := http.StatusNoContent
 	switch {
 	case m.kind == pgrInsert && m.merge && result.inserted == 0:
 		status = http.StatusOK
 	case m.kind == pgrInsert:
 		status = http.StatusCreated
-	case prefer.representation:
+	case prefer.representation():
 		status = http.StatusOK
 	}
-	if !prefer.representation {
+	prefer.setApplied(w, pgrApplied{
+		resolution:     m.kind == pgrInsert && len(m.conflict) > 0,
+		missing:        m.kind != pgrDelete,
+		representation: true,
+		maxAffected:    m.kind != pgrInsert,
+	})
+	if !prefer.representation() {
+		if location := result.location(m.table, m.locate); location != "" {
+			w.Header().Set("Location", location)
+		}
 		w.WriteHeader(status)
 		return
 	}
@@ -380,11 +353,21 @@ func (m *pgrMutation) plan(ctx context.Context, tx *sql.Tx, method, columnsParam
 		}
 		m.written = append(m.written, column)
 	}
+	if m.kind == pgrInsert && (m.headersOnly || (m.upsert && onConflict == "")) {
+		key, err := pgrLoadPrimaryKey(ctx, tx, m.table)
+		if err != nil {
+			return err
+		}
+		m.locate = pgrInTableOrder(key, m.schema)
+		if m.upsert && onConflict == "" {
+			m.conflict = key
+		}
+	}
 	if m.kind != pgrInsert || !m.upsert {
 		return nil
 	}
-	m.conflict = nil
 	if onConflict != "" {
+		m.conflict = nil
 		for _, item := range pgrSplit(onConflict) {
 			name := strings.Trim(strings.TrimSpace(item), `"`)
 			if err := pgrCheckName(name, "column"); err != nil {
@@ -392,13 +375,7 @@ func (m *pgrMutation) plan(ctx context.Context, tx *sql.Tx, method, columnsParam
 			}
 			m.conflict = append(m.conflict, name)
 		}
-		return nil
 	}
-	key, err := pgrLoadPrimaryKey(ctx, tx, m.table)
-	if err != nil {
-		return err
-	}
-	m.conflict = key
 	return nil
 }
 

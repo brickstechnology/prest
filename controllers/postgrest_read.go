@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/lib/pq"
 	"github.com/structy/log"
@@ -38,6 +37,7 @@ import (
 	pctx "github.com/prest/prest/v2/context"
 	"github.com/prest/prest/v2/internal/ident"
 	"github.com/prest/prest/v2/internal/logsafe"
+	"github.com/prest/prest/v2/internal/pgrwire"
 	"github.com/prest/prest/v2/projectkeys"
 )
 
@@ -102,18 +102,20 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The media type is chosen after the caller is known and before anything
-	// is asked of the Database, as PostgREST negotiates after it authenticates.
-	media, err := pgrNegotiate(r.Header.Get("Accept"))
-	if err != nil {
-		pgrWriteError(w, err)
-		return
+	// PostgREST finds the table, plans the read, and only then negotiates the
+	// media type and checks the preferences, so a refusal of either waits for
+	// the table (PGRST205) and the plan (Plan.hs, wrappedReadPlan). It is
+	// known now, because it needs no Database, and raised in the transaction.
+	media, early := pgrNegotiate(r.Header.Get("Accept"))
+	prefer := pgrParsePrefer(r.Header.Values("Prefer"))
+	if early == nil {
+		early = prefer.strictFault()
 	}
 
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
-	counted := pgrWantsCount(r.Header.Get("Prefer"))
+	counted := prefer.counted()
 	var rows []json.RawMessage
 	var text string
 	var pageRows int64
@@ -124,8 +126,16 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 			// attempt's only once.
 			again := *read
 			again.where, again.args = append([]string(nil), read.where...), append([]any(nil), read.args...)
+			if early != nil || read.hasEmbeds() {
+				if missing := pgrMissingTable(ctx, tx, table); missing != nil {
+					return missing
+				}
+			}
 			if err := again.plan(ctx, tx, table); err != nil {
 				return err
+			}
+			if early != nil {
+				return early
 			}
 			if media.isJSON() {
 				rowsSQL, err := again.rowsSQLAs(table, media)
@@ -174,10 +184,19 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		log.Errorln(logsafe.Error(err))
 		failure := pgrReadFailure(err)
 		var pqErr *pq.Error
-		if media.kind == pgrMediaGeoJSON && errors.As(err, &pqErr) {
-			// PostgREST runs the query and passes the Database's refusal on
-			// as it is: without PostGIS, 42883 and a 404.
-			failure = pgrWriteFailure(err, true)
+		if errors.As(err, &pqErr) {
+			switch {
+			case string(pqErr.Code) == undefinedTable:
+				// A table the Database does not have is PostgREST's PGRST205,
+				// with the hint its schema cache computes.
+				if missing := h.tableNotFound(ctx, adapter, caller, table); missing != nil {
+					failure = missing
+				}
+			case media.kind == pgrMediaGeoJSON:
+				// PostgREST runs the query and passes the Database's refusal on
+				// as it is: without PostGIS, 42883 and a 404.
+				failure = pgrWriteFailure(err, true)
+			}
 		}
 		pgrWriteError(w, failure)
 		return
@@ -189,6 +208,7 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Range", pgrContentRange(read.offset, returned, total, counted))
 	w.Header().Set("Content-Type", media.contentType())
+	prefer.setApplied(w, pgrApplied{})
 	var body []byte
 	switch {
 	case media.object():
@@ -197,7 +217,7 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 			pgrWriteError(w, &pgrError{
 				status:  http.StatusNotAcceptable,
 				code:    "PGRST116",
-				message: "JSON object requested, multiple (or no) rows returned",
+				message: "Cannot coerce the result to a single JSON object",
 				details: fmt.Sprintf("The result contains %d rows", len(rows)),
 			})
 			return
@@ -259,7 +279,7 @@ func (h *CRUDHandler) resolveCaller(r *http.Request, project string, adapter ada
 			return adapters.Caller{}, &pgrError{status: http.StatusServiceUnavailable, code: "PGRST001",
 				message: "the Project's key set could not be read, so a User's token cannot be checked now; try again"}
 		case err != nil:
-			return adapters.Caller{}, pgrTokenRefused("the User's token does not verify for this Project")
+			return adapters.Caller{}, pgrTokenFault(err)
 		}
 		return adapters.Caller{Role: role, Claims: claims}, nil
 	}
@@ -278,8 +298,22 @@ func (h *CRUDHandler) resolveCaller(r *http.Request, project string, adapter ada
 	return adapters.Caller{Role: role}, nil
 }
 
+// pgrTokenRefused is a token rest refuses and PostgREST would not: one signed
+// for another Project, or with claims rest cannot read. It is PGRST301, "No
+// suitable key or wrong key type", the answer to a token the Project's keys did
+// not sign, and details says what rest checked.
 func pgrTokenRefused(details string) error {
-	return &pgrError{status: http.StatusUnauthorized, code: "PGRST301", message: "the token is refused", details: details}
+	return pgrwire.WrongKey(details)
+}
+
+// pgrTokenFault is a User's token that did not verify, as PostgREST 14
+// refuses it: the fault projectkeys carries, or PGRST301 when it carries none.
+func pgrTokenFault(err error) error {
+	var fault *pgrwire.TokenError
+	if errors.As(err, &fault) {
+		return fault
+	}
+	return pgrwire.WrongKey("")
 }
 
 // pgrAdmissionFailure is admissionFailure's two answers in PostgREST's shape.
@@ -290,19 +324,6 @@ func pgrAdmissionFailure(err error) error {
 		code = "MS103"
 	}
 	return &pgrError{status: status, code: code, message: message}
-}
-
-// pgrWantsCount reads Prefer's count. exact, planned and estimated are all
-// answered with the exact count: it is what the planned and estimated counts
-// approximate, and a read is already bounded by the time limit.
-func pgrWantsCount(prefer string) bool {
-	for _, part := range strings.Split(prefer, ",") {
-		switch strings.TrimSpace(part) {
-		case "count=exact", "count=planned", "count=estimated":
-			return true
-		}
-	}
-	return false
 }
 
 // pgrContentRange is PostgREST's Content-Range: the rows of the page, and the
@@ -361,10 +382,17 @@ func pgrReadFailure(err error) error {
 	return failure
 }
 
-// pgrWriteError answers err in PostgREST's error shape.
+// pgrWriteError answers err in PostgREST's error shape: the four-field body
+// with its Content-Type, the Proxy-Status PostgREST adds to every error, and
+// WWW-Authenticate on a 401 (internal/pgrwire).
 func pgrWriteError(w http.ResponseWriter, err error) {
 	var refused *pgrError
 	if !errors.As(err, &refused) {
+		var fault *pgrwire.TokenError
+		if errors.As(err, &fault) {
+			pgrwire.Write(w, fault.Envelope())
+			return
+		}
 		refused = &pgrError{status: http.StatusInternalServerError, code: "PGRST000", message: "the read could not be completed"}
 	}
 	nullable := func(s string) any {
@@ -377,13 +405,12 @@ func pgrWriteError(w http.ResponseWriter, err error) {
 	if refused.detailsList != nil {
 		details = refused.detailsList
 	}
-	body, _ := json.Marshal(map[string]any{
-		"code":    refused.code,
-		"message": refused.message,
-		"details": details,
-		"hint":    nullable(refused.hint),
+	pgrwire.Write(w, pgrwire.Error{
+		Status:    refused.status,
+		Code:      refused.code,
+		Message:   refused.message,
+		Details:   details,
+		Hint:      nullable(refused.hint),
+		Challenge: refused.challenge,
 	})
-	w.Header().Set("Content-Type", pgrJSONMediaType)
-	w.WriteHeader(refused.status)
-	_, _ = w.Write(body)
 }

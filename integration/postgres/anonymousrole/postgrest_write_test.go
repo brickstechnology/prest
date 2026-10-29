@@ -378,7 +378,7 @@ func TestPostgRESTWrite_aConstraintReturnsTheDatabasesWordsAndLeavesNoPartialCha
 	require.Equal(t, "PGRST204", refusalOf(t, body)["code"])
 	status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rest_pgw_absent", f.a, nil, `{"a":1}`)
 	require.Equal(t, http.StatusNotFound, status, body)
-	require.Equal(t, "42P01", refusalOf(t, body)["code"])
+	require.Equal(t, "PGRST205", refusalOf(t, body)["code"])
 
 	// A body that is not JSON objects.
 	for _, bad := range []string{``, `not json`, `42`, `[1,2]`} {

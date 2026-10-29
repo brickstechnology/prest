@@ -244,7 +244,7 @@ func TestPostgRESTMedia_whatRestCannotProduceIs406PGRST107(t *testing.T) {
 		require.Equal(t, http.StatusNotAcceptable, status, "%s: %s", accept, body)
 		require.JSONEq(t, `{"code":"PGRST107","details":null,"hint":null,"message":"None of these media types are available: `+
 			jsonEscape(listed)+`"}`, body, accept)
-		require.Equal(t, "application/json", headers.Get("Content-Type"))
+		require.Equal(t, "application/json; charset=utf-8", headers.Get("Content-Type"))
 
 		// A write is refused before it runs: nothing changed.
 		before := theNotes(t, f.db)
@@ -289,7 +289,7 @@ func TestPostgRESTMedia_jsonIsUnchanged(t *testing.T) {
 		status, h, body := send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id,name&order=id&limit=2", f.anon, headers, "")
 		require.Equal(t, http.StatusOK, status, "%q: %s", accept, body)
 		require.JSONEq(t, `[{"id":1,"name":"Thailand"},{"id":2,"name":"Japan"}]`, body, accept)
-		require.Equal(t, "application/json", h.Get("Content-Type"), accept)
+		require.Equal(t, "application/json; charset=utf-8", h.Get("Content-Type"), accept)
 	}
 
 	// .single()
@@ -332,7 +332,7 @@ func TestPostgRESTMedia_geojsonWithoutPostGISIsTheDatabasesRefusal(t *testing.T)
 
 	status, headers, body := send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id", f.anon, geo, "")
 	refusedWithoutPostGIS(t, status, body)
-	require.Equal(t, "application/json", headers.Get("Content-Type"))
+	require.Equal(t, "application/json; charset=utf-8", headers.Get("Content-Type"))
 
 	status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgc_titles", f.a, geo, `{"min_id":1}`)
 	refusedWithoutPostGIS(t, status, body)
