@@ -569,7 +569,7 @@ you mean the files, and the directory only when the patch owns all of it.
     Paths: `controllers/postgrest_media.go`, `controllers/postgrest_media_test.go`,
     `controllers/postgrest_call.go`, `controllers/postgrest_mutation.go`,
     `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
-    `controllers/postgrest_write.go`,
+    `controllers/postgrest_write.go`, `middlewares/utils.go`,
     `integration/postgres/anonymousrole/postgrest_media_test.go`,
     `MINISHIP.md`
 

@@ -29,7 +29,7 @@ const countries = "rest_pgm_countries"
 //	4   (empty)        YY    back\slash  NULL   NULL            NULL
 func stageCountries(t *testing.T, db *sql.DB) {
 	t.Helper()
-	stagePostgREST(t, db)
+	// The roles are the caller's: newCallFixture and newNotesFixture stage them.
 	drop := fmt.Sprintf(`DROP TABLE IF EXISTS public.%s;`, countries)
 	exec(t, db, drop)
 	t.Cleanup(func() { exec(t, db, drop) })
@@ -244,7 +244,7 @@ func TestPostgRESTMedia_whatRestCannotProduceIs406PGRST107(t *testing.T) {
 		require.Equal(t, http.StatusNotAcceptable, status, "%s: %s", accept, body)
 		require.JSONEq(t, `{"code":"PGRST107","details":null,"hint":null,"message":"None of these media types are available: `+
 			jsonEscape(listed)+`"}`, body, accept)
-		require.Equal(t, "application/json; charset=utf-8", headers.Get("Content-Type"))
+		require.Equal(t, "application/json", headers.Get("Content-Type"))
 
 		// A write is refused before it runs: nothing changed.
 		before := theNotes(t, f.db)
@@ -289,7 +289,7 @@ func TestPostgRESTMedia_jsonIsUnchanged(t *testing.T) {
 		status, h, body := send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id,name&order=id&limit=2", f.anon, headers, "")
 		require.Equal(t, http.StatusOK, status, "%q: %s", accept, body)
 		require.JSONEq(t, `[{"id":1,"name":"Thailand"},{"id":2,"name":"Japan"}]`, body, accept)
-		require.Equal(t, "application/json; charset=utf-8", h.Get("Content-Type"), accept)
+		require.Equal(t, "application/json", h.Get("Content-Type"), accept)
 	}
 
 	// .single()
@@ -322,7 +322,7 @@ func TestPostgRESTMedia_geojsonWithoutPostGISIs406PGRST107(t *testing.T) {
 	status, headers, body := send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id", f.anon, geo, "")
 	require.Equal(t, http.StatusNotAcceptable, status, body)
 	require.JSONEq(t, want, body)
-	require.Equal(t, "application/json; charset=utf-8", headers.Get("Content-Type"))
+	require.Equal(t, "application/json", headers.Get("Content-Type"))
 
 	status, _, body = send(t, f.rest, http.MethodPost, "/rest/v1/rpc/rest_pgc_titles", f.a, geo, `{"min_id":1}`)
 	require.Equal(t, http.StatusNotAcceptable, status, body)
@@ -341,7 +341,7 @@ func TestPostgRESTMedia_geojsonWithoutPostGISIs406PGRST107(t *testing.T) {
 	status, headers, body = send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id&id=eq.1", f.anon, accepting("application/geo+json, application/json;q=0.5"), "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.JSONEq(t, `[{"id":1}]`, body)
-	require.Equal(t, "application/json; charset=utf-8", headers.Get("Content-Type"))
+	require.Equal(t, "application/json", headers.Get("Content-Type"))
 }
 
 func TestPostgRESTMedia_geojsonWithPostGISIsAFeatureCollection(t *testing.T) {
