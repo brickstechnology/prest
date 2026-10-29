@@ -102,14 +102,29 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The media type is chosen after the caller is known and before anything
+	// is asked of the Database, as PostgREST negotiates after it authenticates.
+	media, err := pgrNegotiate(r.Header.Get("Accept"))
+	if err != nil {
+		pgrWriteError(w, err)
+		return
+	}
+
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
 	counted := pgrWantsCount(r.Header.Get("Prefer"))
 	var rows []json.RawMessage
+	var text string
+	var pageRows int64
 	var total int64
 	run := func(reader adapters.CallerReader) error {
 		return reader.ReadAsCallerCtx(ctx, caller, func(tx *sql.Tx) error {
+			chosen, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), media)
+			if err != nil {
+				return err
+			}
+			media = chosen
 			// A retry builds the read again, so the arguments are the first
 			// attempt's only once.
 			again := *read
@@ -117,16 +132,26 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 			if err := again.plan(ctx, tx, table); err != nil {
 				return err
 			}
-			rowsSQL, err := again.rowsSQL(table)
-			if err != nil {
-				return err
-			}
-			var out string
-			if err := tx.QueryRowContext(ctx, rowsSQL, again.args...).Scan(&out); err != nil {
-				return err
-			}
-			if err := json.Unmarshal([]byte(out), &rows); err != nil {
-				return err
+			if media.isJSON() {
+				rowsSQL, err := again.rowsSQLAs(table, media)
+				if err != nil {
+					return err
+				}
+				var out string
+				if err := tx.QueryRowContext(ctx, rowsSQL, again.args...).Scan(&out); err != nil {
+					return err
+				}
+				if err := json.Unmarshal([]byte(out), &rows); err != nil {
+					return err
+				}
+			} else {
+				page, err := again.pageSQL(table)
+				if err != nil {
+					return err
+				}
+				if err := tx.QueryRowContext(ctx, media.counted(page), again.args...).Scan(&text, &pageRows); err != nil {
+					return err
+				}
 			}
 			if counted {
 				return tx.QueryRowContext(ctx, again.countSQL(table), again.countArgs()...).Scan(&total)
@@ -156,13 +181,17 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Range", pgrContentRange(read.offset, len(rows), total, counted))
-	body := []byte("[]")
-	if len(rows) > 0 {
-		body, _ = json.Marshal(rows)
+	returned := len(rows)
+	if !media.isJSON() {
+		returned = int(pageRows)
 	}
-	if strings.Contains(r.Header.Get("Accept"), pgrObjectMediaType) {
+	w.Header().Set("Content-Range", pgrContentRange(read.offset, returned, total, counted))
+	w.Header().Set("Content-Type", media.contentType())
+	var body []byte
+	switch {
+	case media.object():
 		if len(rows) != 1 {
+			w.Header().Del("Content-Type")
 			pgrWriteError(w, &pgrError{
 				status:  http.StatusNotAcceptable,
 				code:    "PGRST116",
@@ -172,9 +201,13 @@ func (h *CRUDHandler) PostgRESTRead(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body = rows[0]
-		w.Header().Set("Content-Type", pgrObjectMediaType+"; charset=utf-8")
-	} else {
-		w.Header().Set("Content-Type", pgrJSONMediaType)
+	case media.isJSON():
+		body = []byte("[]")
+		if len(rows) > 0 {
+			body, _ = json.Marshal(rows)
+		}
+	default:
+		body = []byte(text)
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
@@ -304,6 +337,12 @@ func pgrReadFailure(err error) error {
 			failure.status = http.StatusNotFound
 		case queryCanceled:
 			failure.hint = "ask for fewer rows, or add a filter an index can answer"
+		case "22023":
+			// PostGIS's own refusal of application/geo+json on a table with no
+			// geometry column, which PostgREST passes on (PostGISSpec.hs).
+			if pqErr.Message == "geometry column is missing" {
+				failure.message = pqErr.Message
+			}
 		case "22P02", "22007", "22008", "42883":
 			failure.message = "a filter's value is not of its column's type"
 			if string(pqErr.Code) == "42883" {

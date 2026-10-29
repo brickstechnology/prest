@@ -228,6 +228,8 @@ type pgrMutation struct {
 	// ones: only a merge-duplicates upsert's status depends on it.
 	tracksInserted bool
 	quota          int
+	// media is how the rows come back (postgrest_media.go).
+	media pgrMedia
 }
 
 func (m *pgrMutation) jsonType() string {
@@ -372,6 +374,9 @@ type pgrMutationResult struct {
 	total    int64
 	inserted int64
 	rows     []json.RawMessage
+	// text is the body of a representation that is not a JSON array: CSV or
+	// GeoJSON.
+	text string
 }
 
 // run executes the write and reads its result. The rows are aggregated in the
@@ -395,8 +400,9 @@ func (m *pgrMutation) run(ctx context.Context, tx *sql.Tx, args []any) (pgrMutat
 			}
 			columns = append(columns, `"t".`+pgrQuote(name))
 		}
-		rows = fmt.Sprintf(`CASE WHEN (SELECT count(*) FROM "pgrst_w") > %d THEN '[]' ELSE (SELECT coalesce(json_agg(x), '[]'::json)::text FROM (SELECT %s FROM "pgrst_w" AS "t"%s) AS x) END`,
-			m.quota, strings.Join(columns, ", "), m.order)
+		page := fmt.Sprintf(`SELECT %s FROM "pgrst_w" AS "t"%s`, strings.Join(columns, ", "), m.order)
+		rows = fmt.Sprintf(`CASE WHEN (SELECT count(*) FROM "pgrst_w") > %d THEN '[]' ELSE (%s) END`,
+			m.quota, m.media.aggregate(page, "x", false))
 	}
 	query := fmt.Sprintf(`WITH "pgrst_w" AS (%s) SELECT (SELECT count(*) FROM "pgrst_w"), %s, %s`, m.statement(), inserted, rows)
 	var out string
@@ -404,6 +410,10 @@ func (m *pgrMutation) run(ctx context.Context, tx *sql.Tx, args []any) (pgrMutat
 		return result, err
 	}
 	if m.representation {
+		if !m.media.isJSON() {
+			result.text = out
+			return result, nil
+		}
 		if err := json.Unmarshal([]byte(out), &result.rows); err != nil {
 			return result, err
 		}

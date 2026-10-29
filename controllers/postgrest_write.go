@@ -236,11 +236,26 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
-	wantsObject := strings.Contains(r.Header.Get("Accept"), pgrObjectMediaType)
+	// PostgREST negotiates the media type for every write, one that returns
+	// nothing included, and before the write runs.
+	media, err := pgrNegotiate(r.Header.Get("Accept"))
+	if err != nil {
+		pgrWriteError(w, err)
+		return
+	}
+	m.media = media
+	wantsObject := media.object()
 	var result pgrMutationResult
 	run := func(writer adapters.CallerWriter) error {
 		result = pgrMutationResult{}
 		return writer.WriteAsCallerCtx(ctx, caller, func(tx *sql.Tx) error {
+			if prefer.representation {
+				chosen, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), m.media)
+				if err != nil {
+					return err
+				}
+				m.media = chosen
+			}
 			schema, err := pgrLoadColumns(ctx, tx, table)
 			if err != nil {
 				return err
@@ -315,10 +330,18 @@ func (h *CRUDHandler) PostgRESTWrite(w http.ResponseWriter, r *http.Request) {
 	if len(result.rows) > 0 {
 		body, _ = json.Marshal(result.rows)
 	}
-	w.Header().Set("Content-Type", pgrJSONMediaType)
-	if wantsObject && len(result.rows) == 1 {
+	w.Header().Set("Content-Type", m.media.contentType())
+	switch {
+	case wantsObject && len(result.rows) == 1:
 		body = result.rows[0]
-		w.Header().Set("Content-Type", pgrObjectMediaType+"; charset=utf-8")
+	case wantsObject:
+		// An object asked for and none changed: the empty array, as before.
+		w.Header().Set("Content-Type", pgrJSONMediaType)
+	case !m.media.isJSON():
+		body = []byte(result.text)
+		if result.text == "" {
+			body = []byte(m.media.empty())
+		}
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)

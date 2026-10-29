@@ -503,12 +503,26 @@ func (q *pgrRead) whereSQL() string {
 // items were written. Rendering a read that embeds adds the arguments of the
 // embedded filters, so it is rendered once.
 func (q *pgrRead) rowsSQL(table string) (string, error) {
+	return q.rowsSQLAs(table, pgrMedia{})
+}
+
+// pageSQL is the page's rows, before they are aggregated into a body.
+func (q *pgrRead) pageSQL(table string) (string, error) {
 	selected, err := q.fieldsSQL(q.items, "t")
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`SELECT coalesce(json_agg(x), '[]'::json)::text FROM (SELECT %s FROM %s AS "t"%s%s LIMIT %d OFFSET %d) AS x`,
+	return fmt.Sprintf(`SELECT %s FROM %s AS "t"%s%s LIMIT %d OFFSET %d`,
 		selected, pgrTable(table), q.whereSQL(), q.order, q.limit, q.offset), nil
+}
+
+// rowsSQLAs is the page as the body media asks for it (postgrest_media.go).
+func (q *pgrRead) rowsSQLAs(table string, media pgrMedia) (string, error) {
+	page, err := q.pageSQL(table)
+	if err != nil {
+		return "", err
+	}
+	return media.aggregate(page, "x", false), nil
 }
 
 // countSQL is how many rows the filters match, before the page. It is asked

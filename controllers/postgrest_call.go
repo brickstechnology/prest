@@ -180,6 +180,13 @@ func pgrPlanCall(routine *pgrRoutine, read *pgrRead, keys map[string]bool, singl
 // parameter: a name passed pgrIdent, and the argument names and types come
 // from the catalog and are quoted.
 func (c *pgrCallPlan) statement(counted bool) (string, []any, error) {
+	return c.statementAs(counted, pgrMedia{})
+}
+
+// statementAs is statement with the page read as the body media asks for. A
+// body that is not a JSON array (CSV, GeoJSON) comes with a third column, how
+// many rows the page has.
+func (c *pgrCallPlan) statementAs(counted bool, media pgrMedia) (string, []any, error) {
 	read := c.read
 	args := append([]any(nil), read.args...)
 	arg := func(cast string) string {
@@ -222,30 +229,34 @@ func (c *pgrCallPlan) statement(counted bool) (string, []any, error) {
 		return "", nil, err
 	}
 	source := pgrQuote("pgrst_source")
-	var page string
+	var page, pageRows string
 	switch c.routine.result {
 	case pgrResultVoid:
 		// The call is read once so that it runs, and nothing is shown of it.
 		page = fmt.Sprintf(`(SELECT '[]' WHERE (SELECT count(*) FROM %s) >= 0)`, source)
 	default:
-		value := `"x"`
-		if c.routine.scalar() {
-			value = `"x"."pgrst_scalar"`
+		inner := fmt.Sprintf(`SELECT %s FROM %s AS "t"%s%s LIMIT %d OFFSET %d`,
+			fields, source, read.whereSQL(), read.order, read.limit, read.offset)
+		page = "(" + media.aggregate(inner, `"x"`, c.routine.scalar()) + ")"
+		if !media.isJSON() {
+			pageRows = fmt.Sprintf(", (SELECT count(*) FROM (%s) AS \"n\")", inner)
 		}
-		page = fmt.Sprintf(`(SELECT coalesce(json_agg(%s), '[]'::json)::text FROM (SELECT %s FROM %s AS "t"%s%s LIMIT %d OFFSET %d) AS "x")`,
-			value, fields, source, read.whereSQL(), read.order, read.limit, read.offset)
 	}
 	count := "NULL::bigint"
 	if counted {
 		count = fmt.Sprintf(`(SELECT count(*) FROM %s AS "t"%s)`, source, read.whereSQL())
 	}
-	return fmt.Sprintf("WITH %s AS (%s) SELECT %s, %s", source, call.String(), page, count), args, nil
+	return fmt.Sprintf("WITH %s AS (%s) SELECT %s, %s%s", source, call.String(), page, count, pageRows), args, nil
 }
 
 // pgrCallResult is what a call answered.
 type pgrCallResult struct {
 	rows  []json.RawMessage
 	total int64
+	// text and pageRows are the body and its row count when the media type is
+	// not a JSON array.
+	text     string
+	pageRows int64
 }
 
 // pgrChangedRows is the rows the current transaction has inserted, updated and
@@ -393,11 +404,22 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r, project)
 	defer cancel()
 
-	wantsObject := strings.Contains(r.Header.Get("Accept"), pgrObjectMediaType)
+	media, err := pgrNegotiate(r.Header.Get("Accept"))
+	if err != nil {
+		pgrWriteError(w, err)
+		return
+	}
+	wantsObject := media.object()
 	var routine *pgrRoutine
 	var result pgrCallResult
 	exec := func(tx *sql.Tx) error {
 		result = pgrCallResult{}
+		resolved, err := pgrResolveGeoJSON(ctx, tx, r.Header.Get("Accept"), media)
+		if err != nil {
+			return err
+		}
+		media = resolved
+		wantsObject = media.object()
 		found, err := pgrLoadRoutines(ctx, tx, name)
 		if err != nil {
 			return err
@@ -441,7 +463,7 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		if plan.one == nil && len(plan.specified) == 0 {
 			plan.arguments = ""
 		}
-		statement, args, err := plan.statement(prefer.counted)
+		statement, args, err := plan.statementAs(prefer.counted, media)
 		if err != nil {
 			return err
 		}
@@ -455,11 +477,17 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 		}
 		var page string
 		var total sql.NullInt64
-		if err := tx.QueryRowContext(ctx, statement, args...).Scan(&page, &total); err != nil {
-			return err
-		}
-		if err := json.Unmarshal([]byte(page), &result.rows); err != nil {
-			return err
+		if media.isJSON() || chosen.result == pgrResultVoid {
+			if err := tx.QueryRowContext(ctx, statement, args...).Scan(&page, &total); err != nil {
+				return err
+			}
+			if err := json.Unmarshal([]byte(page), &result.rows); err != nil {
+				return err
+			}
+		} else {
+			if err := tx.QueryRowContext(ctx, statement, args...).Scan(&result.text, &total, &result.pageRows); err != nil {
+				return err
+			}
 		}
 		result.total = total.Int64
 		if counts {
@@ -523,6 +551,9 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	returned := len(result.rows)
+	if !media.isJSON() {
+		returned = int(result.pageRows)
+	}
 	if routine.single() {
 		returned = 1
 	}
@@ -533,21 +564,24 @@ func (h *CRUDHandler) PostgRESTCall(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []byte
 	switch {
+	case !media.isJSON():
+		out = []byte(result.text)
+		w.Header().Set("Content-Type", media.contentType())
 	case routine.single():
 		out = []byte("null")
 		if len(result.rows) > 0 {
 			out = result.rows[0]
 		}
-		w.Header().Set("Content-Type", pgrJSONMediaType)
+		w.Header().Set("Content-Type", media.contentType())
 	case wantsObject:
 		out = result.rows[0]
-		w.Header().Set("Content-Type", pgrObjectMediaType+"; charset=utf-8")
+		w.Header().Set("Content-Type", media.contentType())
 	default:
 		out = []byte("[]")
 		if len(result.rows) > 0 {
 			out, _ = json.Marshal(result.rows)
 		}
-		w.Header().Set("Content-Type", pgrJSONMediaType)
+		w.Header().Set("Content-Type", media.contentType())
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
