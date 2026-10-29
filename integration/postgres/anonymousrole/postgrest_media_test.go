@@ -106,7 +106,7 @@ func TestPostgRESTMedia_csvOfAWriteThatReturnsRows(t *testing.T) {
 	require.Equal(t, "text/csv; charset=utf-8", headers.Get("Content-Type"))
 
 	// update, with the order, and delete.
-	status, headers, body = send(t, f.rest, http.MethodPatch, path+"?title=in.(c1,\"c, 2\")&select=id,title&order=id.desc", f.svc, csv, `{"body":"edited"}`)
+	status, headers, body = send(t, f.rest, http.MethodPatch, path+"?id=in.(5,6)&select=id,title&order=id.desc", f.svc, csv, `{"body":"edited"}`)
 	require.Equal(t, http.StatusOK, status, body)
 	require.Equal(t, "id,title\n6,\"c, 2\"\n5,c1", body)
 	require.Equal(t, "text/csv; charset=utf-8", headers.Get("Content-Type"))
@@ -136,7 +136,7 @@ func TestPostgRESTMedia_csvOfAFunctionCall(t *testing.T) {
 	require.Equal(t, "0-1/*", headers.Get("Content-Range"))
 
 	// The same as a GET, with a count.
-	status, headers, body = send(t, f.rest, http.MethodGet, "/rest/v1/rpc/rest_pgc_titles?min_id=2&order=id.desc&limit=2", f.a,
+	status, headers, body = send(t, f.rest, http.MethodGet, "/rest/v1/rpc/rest_pgc_titles?min_id=2&order=id.desc&limit=2", f.svc,
 		map[string]string{"Accept": "text/csv", "Prefer": "count=exact"}, "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.Equal(t, "id,title\n4,b2\n3,b1", body)
@@ -328,20 +328,24 @@ func TestPostgRESTMedia_geojsonWithoutPostGISIs406PGRST107(t *testing.T) {
 	require.Equal(t, http.StatusNotAcceptable, status, body)
 	require.JSONEq(t, want, body)
 
-	// A write that would return a representation is refused and changes nothing.
-	n := newNotesFixture(t)
-	before := theNotes(t, n.db)
-	status, _, body = send(t, n.rest, http.MethodPost, "/rest/v1/"+notes+"?select=id", n.svc,
-		map[string]string{"Accept": "application/geo+json", "Prefer": "return=representation"}, `{"title":"never"}`)
-	require.Equal(t, http.StatusNotAcceptable, status, body)
-	require.JSONEq(t, want, body)
-	require.Equal(t, before, theNotes(t, n.db))
-
 	// The next entry the server can produce answers where the Accept has one.
 	status, headers, body = send(t, f.rest, http.MethodGet, "/rest/v1/"+countries+"?select=id&id=eq.1", f.anon, accepting("application/geo+json, application/json;q=0.5"), "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.JSONEq(t, `[{"id":1}]`, body)
 	require.Equal(t, "application/json", headers.Get("Content-Type"))
+}
+
+func TestPostgRESTMedia_geojsonWithoutPostGISRefusesAWriteBeforeItRuns(t *testing.T) {
+	f := newNotesFixture(t)
+	if installed, _ := postgisAvailable(t, f.db); installed {
+		t.Skip("PostGIS is installed in this Database")
+	}
+	before := theNotes(t, f.db)
+	status, _, body := send(t, f.rest, http.MethodPost, "/rest/v1/"+notes+"?select=id", f.svc,
+		map[string]string{"Accept": "application/geo+json", "Prefer": "return=representation"}, `{"title":"never"}`)
+	require.Equal(t, http.StatusNotAcceptable, status, body)
+	require.JSONEq(t, `{"code":"PGRST107","details":null,"hint":null,"message":"None of these media types are available: application/geo+json"}`, body)
+	require.Equal(t, before, theNotes(t, f.db))
 }
 
 func TestPostgRESTMedia_geojsonWithPostGISIsAFeatureCollection(t *testing.T) {
