@@ -170,7 +170,8 @@ func MatchURL(url string, whitelist []string) (match bool, err error) {
 
 // pgrMediaContentType is whether a handler answered in one of the media types
 // of PostgREST that are not application/json: CSV, GeoJSON, and the vendored
-// object and array types, whose Content-Type names the null strip.
+// object and array types, whose Content-Type names the null strip, and the
+// OpenAPI document of the root (miniship-cloud#1890).
 func pgrMediaContentType(contentType string) bool {
 	// miniship (miniship-cloud#1888): application/json; charset=utf-8 is
 	// PostgREST's own Content-Type for JSON (toContentType, MediaType.hs). A
@@ -179,7 +180,7 @@ func pgrMediaContentType(contentType string) bool {
 	if contentType == "application/json; charset=utf-8" {
 		return true
 	}
-	for _, prefix := range []string{"text/csv", "application/geo+json", "application/vnd.pgrst."} {
+	for _, prefix := range []string{"text/csv", "application/geo+json", "application/vnd.pgrst.", "application/openapi+json"} {
 		if strings.HasPrefix(contentType, prefix) {
 			return true
 		}

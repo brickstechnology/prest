@@ -12,7 +12,7 @@ import (
 )
 
 func TestNotFound_onTheSDKAddressIsPGRST125(t *testing.T) {
-	for _, path := range []string{"/rest/v1/", "/rest/v1/a/b", "/rest/v1/rpc/f/g"} {
+	for _, path := range []string{"/rest/v1/a/b", "/rest/v1/rpc/f/g"} {
 		rec := httptest.NewRecorder()
 		notFound(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		require.Equal(t, http.StatusNotFound, rec.Code, path)

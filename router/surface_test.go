@@ -27,6 +27,7 @@ import (
 var keptRoutes = []string{
 	"GET /_health",
 	"GET /{database}/{schema}/{table}",
+	"GET,HEAD /rest/v1/",
 	"GET,HEAD /rest/v1/{table}",
 	"GET,HEAD,POST,PUT,PATCH,DELETE /rest/v1/rpc/{function}",
 	"POST,PATCH,DELETE /rest/v1/{table}",
