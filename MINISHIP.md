@@ -637,6 +637,31 @@ you mean the files, and the directory only when the patch owns all of it.
     `integration/postgres/anonymousrole/postgrest_write_test.go`,
     `MINISHIP.md`
 
+29. **The OpenAPI document of `/rest/v1/`** — miniship-cloud#1890, ADR 0075:
+    `GET` and `HEAD` on `/rest/v1/` is what supabase-js's `getOpenApiSpec()`
+    reads. A Supabase hosted Project answers it to a secret key only (the
+    changelog of 17 February 2026, "Removing access to OpenAPI spec via the
+    anon key"), so `service_role` gets PostgREST v14.18's Swagger 2.0 document
+    (`Response/OpenAPI.hs`) in `Content-Type: application/openapi+json;
+    charset=utf-8`, and every other caller (the publishable key's anon token, a
+    signed-in User's token, a call with no token) is `403` with `{"message":
+    "Access to schema is forbidden", "hint": "Accessing the schema via the Data
+    API is only allowed using a secret API key."}`. The document is PostgREST's
+    default `openapi-mode`, follow-privileges: it is read from the catalog in the
+    caller's own transaction and lists the tables and views the role owns or
+    holds a privilege on (`accessibleTables`) and the functions it may execute
+    (`accessibleFuncs`), with the columns, defaults, enums, lengths and the
+    primary and foreign key notes PostgREST writes, a view's keys read from its
+    rewrite rule as `allViewsKeyDependencies` reads them. The root accepts
+    `openapi+json`, `json` and `*/*`, and is `406 PGRST107` otherwise.
+    Paths: `controllers/postgrest_openapi.go`,
+    `controllers/postgrest_openapi_views.go`,
+    `controllers/postgrest_openapi_test.go`, `middlewares/utils.go`,
+    `router/router.go`, `router/surface_test.go`,
+    `router/postgrest_notfound_test.go`,
+    `integration/postgres/anonymousrole/postgrest_openapi_test.go`,
+    `MINISHIP.md`
+
 ## Taking an upstream fix
 
 miniship-cloud's `upstream prest` workflow runs once a day and opens an issue

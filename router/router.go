@@ -60,6 +60,9 @@ func RegisterRoutes(
 	// called rest. It carries the CRUD stack's middlewares as the table read
 	// does, for the same reasons.
 	router.Handle("/rest/v1/{table}", crudRoute(crudStack, h.CRUD.PostgRESTRead)).Methods("GET", "HEAD")
+	// miniship-cloud#1890: the root of the same address is the OpenAPI document,
+	// which supabase-js's getOpenApiSpec() reads; a secret key's alone.
+	router.Handle("/rest/v1/", crudRoute(crudStack, h.CRUD.PostgRESTOpenAPI)).Methods("GET", "HEAD")
 	// miniship-cloud#1303: the same address writes, as its caller, under the
 	// row rules, in one transaction.
 	router.Handle("/rest/v1/{table}", crudRoute(crudStack, h.CRUD.PostgRESTWrite)).Methods("POST", "PATCH", "DELETE")
