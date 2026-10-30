@@ -38,6 +38,9 @@ var pgrCastType = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z
 type pgrStep struct {
 	key  string
 	text bool
+	// quoted is a key written in double quotes: a key of an object even when
+	// it reads as a number.
+	quoted bool
 }
 
 // pgrColumn is a column and the json path into it, if any.
@@ -46,14 +49,16 @@ type pgrColumn struct {
 	steps []pgrStep
 }
 
-// pgrParseColumn reads `name`, `name->a`, `name->a->>b` and `name->0`.
+// pgrParseColumn reads `name`, `"my col"`, `name->a`, `name->a->>b`,
+// `name->0` and `name->"a b"`.
 func pgrParseColumn(raw string) (pgrColumn, error) {
-	name, rest, _ := strings.Cut(raw, "->")
-	column := pgrColumn{name: strings.TrimSpace(name)}
-	if err := pgrCheckName(column.name, "column"); err != nil {
+	name, rest, found := pgrCutOutside(raw, "->")
+	var column pgrColumn
+	var err error
+	if column.name, err = pgrName(name, "column"); err != nil {
 		return pgrColumn{}, err
 	}
-	if !strings.Contains(raw, "->") {
+	if !found {
 		return column, nil
 	}
 	rest = "->" + rest
@@ -65,19 +70,39 @@ func pgrParseColumn(raw string) (pgrColumn, error) {
 		case strings.HasPrefix(rest, "->"):
 			rest = rest[2:]
 		}
-		key := rest
-		if i := strings.Index(rest, "->"); i >= 0 {
-			key, rest = rest[:i], rest[i:]
+		rest = strings.TrimLeft(rest, " \t")
+		var key string
+		quoted := false
+		if strings.HasPrefix(rest, `"`) {
+			end := pgrQuotedEnd(rest, 0)
+			if end < 0 {
+				return pgrColumn{}, pgrRefuse(`a quoted key of a json path is closed by a "`)
+			}
+			key, _ = pgrUnquote(rest[:end])
+			quoted = true
+			rest = strings.TrimLeft(rest[end:], " \t")
+			if rest != "" && !strings.HasPrefix(rest, "->") {
+				return pgrColumn{}, pgrRefuse("nothing follows a quoted key of a json path but another ->")
+			}
 		} else {
-			rest = ""
-		}
-		if !pgrPathKey.MatchString(key) {
-			return pgrColumn{}, pgrRefuse("a key of a json path is letters, digits and _")
+			key = rest
+			if i := strings.Index(rest, "->"); i >= 0 {
+				key, rest = rest[:i], rest[i:]
+			} else {
+				rest = ""
+			}
+			key = strings.TrimSpace(key)
+			if !pgrPathKey.MatchString(key) {
+				return pgrColumn{}, pgrRefuse("a key of a json path is letters, digits and _, or a double-quoted key")
+			}
 		}
 		if text && rest != "" {
 			return pgrColumn{}, pgrRefuse("->> gives text, so nothing can follow it in a json path")
 		}
-		column.steps = append(column.steps, pgrStep{key: key, text: text})
+		if strings.IndexByte(key, 0) >= 0 {
+			return pgrColumn{}, pgrRefuse("a key of a json path holds no NUL byte")
+		}
+		column.steps = append(column.steps, pgrStep{key: key, text: text, quoted: quoted})
 	}
 	return column, nil
 }
@@ -90,7 +115,7 @@ func (c pgrColumn) sql(alias string) string {
 		if step.text {
 			operator = "->>"
 		}
-		if _, err := strconv.Atoi(step.key); err == nil {
+		if _, err := strconv.Atoi(step.key); err == nil && !step.quoted {
 			text += operator + step.key
 			continue
 		}
@@ -126,10 +151,16 @@ type pgrItem struct {
 }
 
 // pgrSplitAlias cuts `alias:rest` at the first single colon before any
-// parenthesis. `::` is a cast and is not cut.
+// parenthesis and outside double quotes. `::` is a cast and is not cut.
 func pgrSplitAlias(item string) (alias, rest string) {
 	for i := 0; i < len(item); i++ {
 		switch item[i] {
+		case '"':
+			end := pgrQuotedEnd(item, i)
+			if end < 0 {
+				return "", item
+			}
+			i = end - 1
 		case '(':
 			return "", item
 		case ':':
@@ -158,11 +189,13 @@ func pgrParseSelectList(raw string, depth int) ([]pgrItem, error) {
 		}
 		alias, rest := pgrSplitAlias(text)
 		if alias != "" {
-			if err := pgrCheckName(alias, "alias"); err != nil {
+			name, err := pgrName(alias, "alias")
+			if err != nil {
 				return nil, err
 			}
+			alias = name
 		}
-		if open, cast := strings.Index(rest, "("), strings.Index(rest, "::"); open >= 0 && (cast < 0 || cast > open) {
+		if open, cast := pgrIndexOutside(rest, "("), pgrIndexOutside(rest, "::"); open >= 0 && (cast < 0 || cast > open) {
 			embed, err := pgrParseEmbed(alias, rest, open, depth)
 			if err != nil {
 				return nil, err
@@ -187,7 +220,7 @@ func pgrParseField(alias, raw string) (*pgrField, error) {
 		}
 		return &pgrField{star: true}, nil
 	}
-	body, cast, hasCast := strings.Cut(raw, "::")
+	body, cast, hasCast := pgrCutOutside(raw, "::")
 	field := &pgrField{alias: alias}
 	if hasCast {
 		cast = strings.TrimSpace(cast)

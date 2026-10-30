@@ -437,6 +437,22 @@ func (p *pgrOpParser) until(at int, stops string) (string, int) {
 	return p.src[at:end], end
 }
 
+// untilUnquoted is until, except that a double-quoted run is passed over whole,
+// so a column named "a.b" or "a,b" is one name.
+func (p *pgrOpParser) untilUnquoted(at int, stops string) (string, int) {
+	end := at
+	for end < len(p.src) && !strings.ContainsRune(stops, rune(p.src[end])) {
+		if p.src[end] == '"' {
+			if closed := pgrQuotedEnd(p.src, end); closed > 0 {
+				end = closed
+				continue
+			}
+		}
+		end++
+	}
+	return p.src[at:end], end
+}
+
 func (p *pgrOpParser) listElement() string {
 	if value, end, ok := p.quoted(p.pos); ok {
 		// notFollowedBy (noneOf ",)"): the quote closes the element.
@@ -566,7 +582,7 @@ func (p *pgrOpParser) node() (*pgrLogic, error) {
 // all is a failure to fall back from (fail); a column that is not a plain name
 // is a refusal of its own (hard).
 func (p *pgrOpParser) logicFilter() (leaf *pgrLogic, fail *pgrParseFail, hard error) {
-	field, end := p.until(p.pos, ".(),")
+	field, end := p.untilUnquoted(p.pos, ".(),")
 	if end >= len(p.src) || p.src[end] != '.' || strings.TrimSpace(field) == "" {
 		return nil, p.fail(end, "delimiter (.)"), nil
 	}

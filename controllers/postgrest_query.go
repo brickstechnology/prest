@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/lib/pq"
 )
@@ -29,9 +30,9 @@ import (
 // pgrSchema is the one schema the address serves, as the table read serves.
 const pgrSchema = servedSchema
 
-// pgrIdent is a plain Postgres name: what a column or a table may be called
-// here. A quoted name is not answered yet; a JSON path, a cast and an alias
-// are read by postgrest_select.go around a name that passed this.
+// pgrIdent is a plain Postgres name. A name in double quotes is read by pgrName
+// instead; a JSON path, a cast and an alias are read by postgrest_select.go
+// around a name that passed one or the other.
 var pgrIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
 
 // pgrError is a refusal in PostgREST's shape: a status and the four fields the
@@ -86,31 +87,129 @@ func pgrCheckName(name, what string) error {
 	return nil
 }
 
-// pgrSplit splits s on commas outside parentheses and outside double quotes;
-// a double-quoted run keeps its commas and loses its quotes.
-func pgrSplit(s string) []string {
-	var out []string
-	var current strings.Builder
-	depth := 0
-	quoted := false
-	for _, ch := range s {
-		switch {
-		case ch == '"':
-			quoted = !quoted
-		case ch == '(' && !quoted:
-			depth++
-			current.WriteRune(ch)
-		case ch == ')' && !quoted:
-			depth--
-			current.WriteRune(ch)
-		case ch == ',' && !quoted && depth == 0:
-			out = append(out, current.String())
-			current.Reset()
-		default:
-			current.WriteRune(ch)
+// pgrQuotedEnd is the offset just past the double-quoted run that opens at
+// s[i], or -1 when it is not closed. A backslash escapes the next character
+// (QueryParams.hs:688, pQuotedValue).
+func pgrQuotedEnd(s string, i int) int {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
 		}
 	}
-	return append(out, current.String())
+	return -1
+}
+
+// pgrUnquote reads s as one whole double-quoted run: the name inside, with
+// each backslash taken off its character. ok is false when s is anything else.
+func pgrUnquote(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '"' || pgrQuotedEnd(s, 0) != len(s) {
+		return "", false
+	}
+	var out strings.Builder
+	for i := 1; i < len(s)-1; i++ {
+		if s[i] == '\\' {
+			i++
+		}
+		out.WriteByte(s[i])
+	}
+	return out.String(), true
+}
+
+// pgrIndexOutside is the offset of the first sub in s that is not inside a
+// double-quoted run, or -1. A run that is never closed hides the rest of s.
+func pgrIndexOutside(s, sub string) int {
+	for i := 0; i < len(s); {
+		if s[i] == '"' {
+			end := pgrQuotedEnd(s, i)
+			if end < 0 {
+				return -1
+			}
+			i = end
+			continue
+		}
+		if strings.HasPrefix(s[i:], sub) {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+// pgrCutOutside is strings.Cut for a separator outside double quotes.
+func pgrCutOutside(s, sep string) (before, after string, found bool) {
+	if i := pgrIndexOutside(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
+}
+
+// pgrSplitOutside is strings.Split for a separator outside double quotes.
+func pgrSplitOutside(s, sep string) []string {
+	var out []string
+	for {
+		before, after, found := pgrCutOutside(s, sep)
+		out = append(out, before)
+		if !found {
+			return out
+		}
+		s = after
+	}
+}
+
+// pgrName reads a column, an alias, a table or a hint as PostgREST 14 does
+// (QueryParams.hs:353, pFieldName): a double-quoted name of any characters,
+// kept as written with each backslash taken off its character, or a plain
+// name. Spaces outside the quotes are dropped. Nothing but the name leaves it,
+// and it is quoted with pgrQuote wherever it becomes SQL, so a `"` or a `;`
+// inside it is text, never syntax. A name Postgres cannot hold is refused
+// here: the empty one, and one with a NUL byte, which pq.QuoteIdentifier would
+// cut short.
+func pgrName(raw, what string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, `"`) {
+		if err := pgrCheckName(raw, what); err != nil {
+			return "", err
+		}
+		return raw, nil
+	}
+	name, ok := pgrUnquote(raw)
+	if !ok {
+		return "", pgrRefuse(fmt.Sprintf(`a quoted %s is closed by a " and nothing follows it`, what))
+	}
+	if name == "" || strings.IndexByte(name, 0) >= 0 || !utf8.ValidString(name) {
+		return "", pgrRefuse(fmt.Sprintf("a quoted %s is not empty and holds no NUL byte", what))
+	}
+	return name, nil
+}
+
+// pgrSplit splits s on commas outside parentheses and outside double quotes.
+// The quotes stay, so the parts are read again by pgrName.
+func pgrSplit(s string) []string {
+	var out []string
+	start, depth := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			end := pgrQuotedEnd(s, i)
+			if end < 0 {
+				return append(out, s[start:])
+			}
+			i = end - 1
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, s[start:])
 }
 
 // pgrRead is one read, parsed: what to select, the predicates ANDed, the
@@ -273,7 +372,7 @@ func pgrParseOrderAs(alias, raw string) (string, error) {
 	}
 	var parts []string
 	for _, item := range pgrSplit(raw) {
-		segments := strings.Split(strings.TrimSpace(item), ".")
+		segments := pgrSplitOutside(strings.TrimSpace(item), ".")
 		column, err := pgrParseColumn(segments[0])
 		if err != nil {
 			return "", err
