@@ -335,11 +335,21 @@ you mean the files, and the directory only when the patch owns all of it.
     on refuses the read. An embedded table's page is held to `MaxPageSize` as the
     top one is. The select also reads `alias:column`, `column::type` and
     `column->a->>b`, and a filter or an order may name a json path. A spread
-    (`...other(*)`) and aggregates are refused by name.
+    (`...other(*)`) and aggregates are refused by name. miniship-cloud#1890:
+    a name may be double-quoted wherever PostgREST 14 takes one (`pFieldName`,
+    QueryParams.hs): a select item, an alias, a cast, a json key, an embedded
+    table and its hint, an order, a filter and `or`/`and` groups, `columns=` and
+    `on_conflict=`; spaces outside the quotes are dropped, and a name is quoted
+    as an identifier wherever it becomes SQL. A failed read passes the
+    Database's own `message`, `details` and `hint` on with the status
+    PostgREST gives the SQLSTATE (Error.hs, v14.18), as a failed write does;
+    the Database refusing rest's login and the time limit stay rest's words.
     Paths: `controllers/postgrest_embed.go`, `controllers/postgrest_embed_test.go`,
     `controllers/postgrest_query.go`, `controllers/postgrest_read.go`,
     `controllers/postgrest_select.go`,
+    `controllers/postgrest_quoted_names_test.go`,
     `integration/postgres/anonymousrole/postgrest_embed_test.go`,
+    `integration/postgres/anonymousrole/postgrest_quoted_names_test.go`,
     `MINISHIP.md`
 
 21. **The Supabase SDK's writes, on `/rest/v1/{table}`** — miniship-cloud#1303,

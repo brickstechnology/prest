@@ -334,7 +334,16 @@ func (m *pgrMutation) plan(ctx context.Context, tx *sql.Tx, method, columnsParam
 	if columnsParam != "" && m.kind == pgrInsert {
 		names = nil
 		for _, item := range pgrSplit(columnsParam) {
-			names = append(names, strings.Trim(strings.TrimSpace(item), `"`))
+			// The catalog decides whether the column exists, so an unquoted
+			// name is kept as written, dashes and all, as PostgREST reads it.
+			name := strings.TrimSpace(item)
+			if strings.HasPrefix(name, `"`) {
+				var err error
+				if name, err = pgrName(name, "column"); err != nil {
+					return err
+				}
+			}
+			names = append(names, name)
 		}
 	}
 	m.written = nil
@@ -361,8 +370,8 @@ func (m *pgrMutation) plan(ctx context.Context, tx *sql.Tx, method, columnsParam
 	if onConflict != "" {
 		m.conflict = nil
 		for _, item := range pgrSplit(onConflict) {
-			name := strings.Trim(strings.TrimSpace(item), `"`)
-			if err := pgrCheckName(name, "column"); err != nil {
+			name, err := pgrName(item, "column")
+			if err != nil {
 				return err
 			}
 			m.conflict = append(m.conflict, name)

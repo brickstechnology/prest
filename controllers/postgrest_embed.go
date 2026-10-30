@@ -80,11 +80,12 @@ func pgrParseEmbed(alias, text string, open, depth int) (*pgrEmbed, error) {
 		return nil, pgrRefuse("an embedded table is written name(columns)")
 	}
 	embed := &pgrEmbed{alias: alias, limit: -1}
-	head := strings.Split(text[:open], "!")
-	embed.name = strings.TrimSpace(head[0])
-	if err := pgrCheckName(embed.name, "table"); err != nil {
+	head := pgrSplitOutside(text[:open], "!")
+	name, err := pgrName(head[0], "table")
+	if err != nil {
 		return nil, err
 	}
+	embed.name = name
 	for _, part := range head[1:] {
 		part = strings.TrimSpace(part)
 		switch part {
@@ -95,10 +96,11 @@ func pgrParseEmbed(alias, text string, open, depth int) (*pgrEmbed, error) {
 			if embed.hint != "" {
 				return nil, pgrRefuse("an embedded table takes one hint: name!hint(columns)")
 			}
-			if err := pgrCheckName(part, "hint"); err != nil {
+			hint, err := pgrName(part, "hint")
+			if err != nil {
 				return nil, err
 			}
-			embed.hint = part
+			embed.hint = hint
 		}
 	}
 	if body := strings.TrimSpace(text[open+1 : len(text)-1]); body != "" {
@@ -126,13 +128,17 @@ func pgrEmbedsOf(items []pgrItem) []*pgrEmbed {
 // `other.name`, `other.order`, `other.child.name`. It answers that table and
 // the rest of the key, or nil when the key's first segment names no embed.
 func pgrFindEmbed(items []pgrItem, key string) (*pgrEmbed, string) {
-	segments := strings.Split(key, ".")
+	segments := pgrSplitOutside(key, ".")
 	var current *pgrEmbed
 	i := 0
 	for ; i < len(segments)-1; i++ {
 		var next *pgrEmbed
 		for _, embed := range pgrEmbedsOf(items) {
-			if embed.label() == segments[i] {
+			segment := strings.TrimSpace(segments[i])
+			if unquoted, ok := pgrUnquote(segment); ok {
+				segment = unquoted
+			}
+			if embed.label() == segment {
 				next = embed
 				break
 			}

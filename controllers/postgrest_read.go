@@ -339,12 +339,15 @@ func pgrContentRange(offset, rows int, total int64, counted bool) string {
 	return fmt.Sprintf("%d-%d/%s", offset, offset+rows-1, all)
 }
 
-// pgrReadFailure is readFailure's answer in PostgREST's shape: the same
-// status and the same fixed message, with the SQLSTATE as the code where the
-// Database gave one, so the SDK can tell a refused row rule from a mistyped
-// filter. Nothing of the driver's own words is passed on but the one message
-// readFailure already passes, the Database's account of a privilege the role
-// lacks.
+// pgrReadFailure is a failed read in PostgREST's shape. Where the Database
+// refused the read, its own message, SQLSTATE, details and hint are passed on
+// with the status PostgREST maps the SQLSTATE to, as pgrWriteFailure does for a
+// write (Error.hs:576-598 and pgErrorStatus, v14.18): a wrong filter value is
+// `invalid input syntax for type bigint: "abc"`, not a sentence of rest's.
+// Three answers stay rest's own, because they are about rest and not about the
+// request: the Database refusing rest's login (the words say nothing of where
+// it is), the read running past its time limit (504 and a hint, where
+// PostgREST says 500), and a read that never reached the Database.
 func pgrReadFailure(err error, authed bool) error {
 	var refused *pgrError
 	if errors.As(err, &refused) {
@@ -354,31 +357,18 @@ func pgrReadFailure(err error, authed bool) error {
 	failure := &pgrError{status: status, code: "PGRST000", message: message}
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {
-		failure.code = string(pqErr.Code)
-		switch string(pqErr.Code) {
-		case insufficientPrivilege:
-			// 42501 is 403 for a caller PostgREST knows, and 401 for the
-			// anonymous role (Error.hs, pgErrorStatus).
-			if !authed {
-				failure.status = http.StatusUnauthorized
-			}
-		case undefinedTable:
-			failure.status = http.StatusNotFound
+		code := string(pqErr.Code)
+		failure.code = code
+		switch pqErr.Code {
+		case invalidPassword, invalidAuthorizationSpecifier:
+			// readFailure's 502 and its words.
 		case queryCanceled:
 			failure.hint = "ask for fewer rows, or add a filter an index can answer"
-		case "22023":
-			// PostGIS's own refusal of application/geo+json on a table with no
-			// geometry column, which PostgREST passes on (PostGISSpec.hs).
-			if pqErr.Message == "geometry column is missing" {
-				failure.message = pqErr.Message
-			}
-		case "22P02", "22007", "22008", "42883":
-			failure.message = "a filter's value is not of its column's type"
-			if string(pqErr.Code) == "42883" {
-				// An operator the column's type lacks (cs on an integer) is
-				// 404 as PostgREST gives it (Error.hs, pgErrorStatus).
-				failure.status = http.StatusNotFound
-			}
+		default:
+			failure.status = pgrDatabaseStatus(code, pqErr.Message, authed)
+			failure.message = pqErr.Message
+			failure.details = pqErr.Detail
+			failure.hint = pqErr.Hint
 		}
 	}
 	if status == http.StatusGatewayTimeout {
