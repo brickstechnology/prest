@@ -90,8 +90,15 @@ func TestSameHostRegistry_UnreachableAliasIs503(t *testing.T) {
 	assert.NotContains(t, fmt.Sprint(body), "6543")
 	assert.NotContains(t, fmt.Sprint(body), "dial")
 
-	// Health uses the default adapter (main), which is reachable.
-	// Expected: 200.
+	// What: probe liveness while the down alias is unreachable.
+	// Expected: 200, because /_health never pings a database.
+	// Why: a database outage must not fail liveness and restart a healthy process.
 	testutils.DoRequest(t, base+"/_health",
 		nil, http.MethodGet, http.StatusOK, "SameHostRegistryHealth")
+
+	// What: probe readiness while the down alias is unreachable.
+	// Expected: 503, because /_ready pings every registered database.
+	// Why: readiness must report that a registered database cannot serve requests.
+	testutils.DoRequest(t, base+"/_ready",
+		nil, http.MethodGet, http.StatusServiceUnavailable, "SameHostRegistryReady")
 }

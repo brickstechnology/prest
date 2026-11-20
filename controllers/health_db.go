@@ -6,11 +6,13 @@ import (
 	"github.com/prest/prest/v2/adapters"
 )
 
-// DefaultCheckList returns the default liveness checks for /_health.
+// DefaultCheckList returns the default checks for /_health, which is a
+// liveness probe. It runs no database check, so a database outage or a
+// sleeping database does not fail liveness. /_ready checks the databases, see
+// DefaultReadyCheckList. The pinger is kept so callers still compile; add
+// CheckDBHealth(pinger) to a list to make /_health check the database.
 func DefaultCheckList(pinger adapters.DatabasePinger) CheckList {
-	return CheckList{
-		CheckDBHealth(pinger),
-	}
+	return CheckList{}
 }
 
 // CheckDBHealth verifies the default database connection is alive.
@@ -20,7 +22,8 @@ func CheckDBHealth(pinger adapters.DatabasePinger) HealthCheckFunc {
 	}
 }
 
-// DefaultReadyCheckList returns readiness checks for /_ready.
+// DefaultReadyCheckList returns readiness checks for /_ready, which pings
+// every configured database.
 func DefaultReadyCheckList(checker adapters.ReadinessChecker) CheckList {
 	return CheckList{
 		func(ctx context.Context) error {

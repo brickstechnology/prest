@@ -157,7 +157,6 @@ func TestRegisterRoutes_AuthEnabled_RejectsMissingToken(t *testing.T) {
 // Liveness probes stay public even when auth is enabled.
 func TestRegisterRoutes_AuthEnabled_HealthIsPublic(t *testing.T) {
 	f := newTestRouter(t, true)
-	f.pinger.EXPECT().Ping(gomock.Any()).Return(nil)
 
 	rec := serve(f, http.MethodGet, "/_health", "")
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code)

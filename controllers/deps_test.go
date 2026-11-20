@@ -1,6 +1,9 @@
 package controllers
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -80,6 +83,25 @@ func TestNewHandlers(t *testing.T) {
 	require.NotNil(t, h.CRUD)
 	require.NotNil(t, h.Script)
 	require.NotNil(t, h.Health)
+}
+
+// NewHandlers wires /_health to the liveness list and /_ready to the
+// readiness list, so only /_ready reaches the pinger.
+func TestNewHandlers_healthAndReadyWiring(t *testing.T) {
+	t.Parallel()
+
+	p := &countingPinger{err: errors.New("database is down")}
+	h := NewHandlers(Deps{Pinger: p, Readiness: p}, nil)
+
+	rec := httptest.NewRecorder()
+	h.Health.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_health", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Zero(t, p.pings+p.pingAlls)
+
+	rec = httptest.NewRecorder()
+	h.Ready.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_ready", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, 1, p.pingAlls)
 }
 
 func TestNewHandlersFromConfig(t *testing.T) {
